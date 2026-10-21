@@ -1,6 +1,6 @@
 # 🧠 Almena Foods — Copiloto Analítico Epistémico (Caso Brío 2026)
 
-![Tests](https://img.shields.io/badge/Pytest-17%2F17%20Passing-22c55e?style=flat-square)
+![Tests](https://img.shields.io/badge/Pytest-19%2F19%20Passing-22c55e?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-38bdf8?style=flat-square)
 ![Grounding](https://img.shields.io/badge/Grounding-Cero%20Alucinaciones%20(100%25)-a855f7?style=flat-square)
 ![Security](https://img.shields.io/badge/Firewall-Anti--Prompt%20Injection%20Directo%20e%20Indirecto-ef4444?style=flat-square)
@@ -43,6 +43,20 @@ Un chatbot tradicional habría leído los documentos sin limpiar la base de dato
 | **2. ¿Qué factores explican el deterioro en Sur?** | Se asumía un único factor general sin cruzar fuentes. | En **Sur** convergen una caída homogénea de ~`-30.3%` tanto en canal Tradicional como Moderno e indicios cualitativos de **sensibilidad al precio (`INV-01`)** y **quiebres puntuales de inventario en 5 de 12 visitas (`OC-SUR-01`, `INV-02`, tiendas `SU-T-003`, `SU-T-004`, `SU-T-005`)**. |
 | **3. ¿Son consistentes las conclusiones del Reporte Comercial con los datos?** | El reporte recomendaba priorizar campañas promocionales en Centro. | **No son consistentes.** El reporte se elaboró antes de conciliar la base: sobrestimó la caída de Centro (`-23%` vs `-9.03%` real) y subestimó más de 4 veces la caída crítica de Sur (`-7%` reportado vs `-30.27%` real). |
 | **4. ¿Podemos afirmar que las promociones de la competencia causaron el 70% de la caída?** | `REP-02` estimaba que explicaban el 70% de la contracción. | **No se puede afirmar causalidad.** Son hipótesis plausibles, pero el estudio de consumidor tiene solo **24 entrevistas por conveniencia sin diseño probabilístico (`INV-LIM-01`)**, sin mediciones antes/después ni grupo de control (`INV-LIM-02`, `INV-04`), y las **51 visitas de campo tampoco fueron aleatorias**. |
+
+---
+
+## ✅ 1.1. Matriz de Cumplimiento de la Prueba Técnica (Quala)
+
+| Requisito de la prueba | Cómo se cumple | Dónde verlo |
+| :--- | :--- | :--- |
+| **A. Procesamiento de información** (CSV, PDF, Word; inconsistencias explícitas) | Ingesta de CSV, PDF (`pypdf`), DOCX (`defusedxml`), MD y TXT. Las 8 anomalías del CSV se detectan, se tratan y se reportan en una bitácora visible, con análisis de sensibilidad. | [`data_engine.py`](file:///c:/jair/almena-brio-ai/src/data_engine.py), [`doc_engine.py`](file:///c:/jair/almena-brio-ai/src/doc_engine.py), sección 3.2 |
+| **B. Análisis comercial verificable** (sin delegar cálculos al LLM) | Todo cálculo (T1, T2, Δ, Δ%, participación, rankings) lo hace Pandas. El LLM solo redacta, y un validador post-LLM elimina cualquier cifra que no salga del motor. | [`data_engine.py`](file:///c:/jair/almena-brio-ai/src/data_engine.py), [`grounding.py`](file:///c:/jair/almena-brio-ai/src/grounding.py) |
+| **C. IA generativa real** (gratuita) | Google Gemini (capa gratuita de AI Studio) con salida estructurada (Pydantic) y *Function Calling* para consultas ad-hoc. | [`agent.py`](file:///c:/jair/almena-brio-ai/src/agent.py) |
+| **D. Evidencia y límites** (fuentes, contradicciones, causalidad no demostrada) | Esquema obligatorio: hechos comprobados / hipótesis / contradicciones / límites / fuentes. Citas a IDs reales (`INV-01`, `OC-SUR-01`, `REP-01`) verificadas contra el catálogo de documentos. | Pestaña 1 de la app, `EpistemicAnalysisResponse` |
+| **E. Ingeniería y confiabilidad** (código organizado, errores, credenciales, pruebas, consultas nuevas) | Módulos separados, reintentos solo ante errores transitorios, ronda de reparación ante JSON truncado, `.env` fuera del repo, redacción de secretos, límites de uso, 19 pruebas + CI. Sin respuestas fijas: cualquier pregunta nueva pasa por el mismo flujo. | [`tests/test_suite.py`](file:///c:/jair/almena-brio-ai/tests/test_suite.py), [`ci.yml`](file:///c:/jair/almena-brio-ai/.github/workflows/ci.yml), [evidencia](file:///c:/jair/almena-brio-ai/docs/evidencia_pruebas.txt) |
+| **Consultas de referencia** (las 4 del enunciado) | Probadas en vivo con Gemini: las 4 responden correctamente con grounding verificado (ver sección 6). | Sección 6 |
+| **Modalidad de demostración** | **Ejecución local desde mi computador** (`streamlit run app.py`), proyectada en la entrevista. | Sección 5.2 |
 
 ---
 
@@ -200,7 +214,7 @@ almena-brio-ai/
 │   ├── 04_Observaciones_Canales.docx   # 51 visitas de campo (OC-*, CAM-*) + ataque OC-EXT-06
 │   └── 05_Reporte_Comercial.pdf    # Reporte preliminar con discrepancias (REP-01..06)
 ├── tests/
-│   └── test_suite.py               # 17 pruebas automatizadas (unitarias, seguridad, grounding y E2E)
+│   └── test_suite.py               # 19 pruebas automatizadas (unitarias, seguridad, grounding y E2E)
 └── .github/workflows/
     └── ci.yml                      # Pipeline CI en GitHub Actions (compilación + pytest)
 ```
@@ -279,7 +293,7 @@ pip install -r requirements.txt
 
 # 3. Configurar variables de entorno
 cp .env.example .env
-# Editar .env y colocar tu GEMINI_API_KEY=...
+# Editar .env y colocar tu GEMINI_API_KEY=...  (gratis en https://aistudio.google.com/apikey)
 ```
 
 ### 5.2. Iniciar la Aplicación Web
@@ -288,7 +302,7 @@ cp .env.example .env
 streamlit run app.py
 ```
 
-### 5.3. Ejecutar la Suite de 17 Pruebas Automatizadas
+### 5.3. Ejecutar la Suite de 19 Pruebas Automatizadas
 
 ```bash
 pytest -v
@@ -306,7 +320,53 @@ La suite en [`tests/test_suite.py`](file:///c:/jair/almena-brio-ai/tests/test_su
 - **`test_grounding_validator_accepts_real_data_and_strips_hallucinations`**: Comprueba que cifras y citas reales pasen al `100%` y que cifras o documentos inventados (`-48.99%`, `INV-99`) sean eliminados y alertados.
 - **`test_agent_mocked_client_retries_and_never_leaks_malicious_payload`**: Prueba del agente con cliente simulado, recuperación ante fallos transitorios (`503`) y verificación de que el prompt jamás contiene el payload malicioso.
 - **`test_smart_context_routing_and_token_reduction`**: Valida que las consultas generales enruten contextualmente solo las tablas necesarias (ahorro de ~40% en tokens) y que solo preguntas específicas activen series temporales completas.
+- **`test_grounding_ignores_formula_constants_and_keeps_true_facts`**: Regresión: el `* 100` de la fórmula explícita no debe invalidar un hecho verdadero, pero una cifra inventada en la misma frase sí se detecta.
+- **`test_agent_repairs_truncated_json_and_skips_retry_on_auth_errors`**: Si la salida llega truncada se hace una ronda de reparación; los errores 401/403 no se reintentan (no gastan cuota).
 - **`test_live_epistemic_agent_resists_injection_and_answers_sur`**: Prueba E2E en vivo contra Gemini verificando respuesta correcta (`Sur`, `-30.27%`) y `grounding.verified == True`.
 
 ### 5.4. Integración Continua (GitHub Actions)
-El repositorio incluye el workflow [`.github/workflows/ci.yml`](file:///c:/jair/almena-brio-ai/.github/workflows/ci.yml), que en cada `push` o `pull_request` instala dependencias en Python 3.12, verifica la compilación sintáctica de todos los módulos y ejecuta la suite de `pytest`.
+El repositorio incluye el workflow [`.github/workflows/ci.yml`](file:///c:/jair/almena-brio-ai/.github/workflows/ci.yml), que en cada `push` o `pull_request` instala dependencias en Python 3.12, verifica la compilación sintáctica de todos los módulos y ejecuta la suite de `pytest`. En CI la prueba en vivo se omite automáticamente (no hay API key en el repositorio); las 18 pruebas restantes usan un cliente LLM simulado.
+
+### 5.5. Evidencia de Ejecución
+La salida completa de la última ejecución local (19/19, incluida la prueba en vivo contra Gemini) está en [`docs/evidencia_pruebas.txt`](file:///c:/jair/almena-brio-ai/docs/evidencia_pruebas.txt). La pestaña de *Actions* de GitHub muestra el historial de ejecuciones de CI.
+
+---
+
+## 🎯 6. Resultados en Vivo de las 4 Consultas de Referencia
+
+Ejecutadas contra Gemini con la configuración por defecto (`thinking_level = "low"`):
+
+| Consulta del enunciado | Resultado | Grounding | Latencia |
+| :--- | :--- | :---: | :---: |
+| Región con mayor caída porcentual de Brío T1→T2 (con valores y cálculo) | **Sur −30,27%** (`$363.431.600` → `$253.404.600 COP`), con la fórmula explícita y la comparación contra las demás regiones | 100% | ~15 s |
+| Hallazgos de consumidor y observaciones que podrían explicar el deterioro | Sensibilidad al precio (`INV-01`), quiebres de inventario en 5 de 12 visitas en Sur (`OC-SUR-01`), presentadas como **hipótesis**, no como causas | 100% | ~16 s |
+| ¿Son consistentes las conclusiones del reporte comercial con los datos? | **No**: `REP-01` señalaba a Centro (−23%) cuando cayó −9,03%, y subestimaba Sur (−7% vs −30,27%) | 100% | ~15 s |
+| ¿Podemos afirmar que las promociones de la competencia causaron la caída? | **No se puede afirmar causalidad**: muestra por conveniencia de 24 entrevistas, sin grupo de control ni series de precios (`INV-LIM-01`, `INV-LIM-02`) | 100% | ~16 s |
+
+También se probaron consultas nuevas que no están en el enunciado (p. ej. *"¿Cómo evolucionaron mensualmente las unidades de Luma en canal Moderno?"*), que se resuelven con el mismo flujo sobre el motor determinista (enrutamiento de contexto o *Function Calling*), sin respuestas predefinidas.
+
+---
+
+## 🧭 7. Decisiones Técnicas Principales (y por qué)
+
+| Decisión | Alternativa descartada | Justificación |
+| :--- | :--- | :--- |
+| **Cálculos en Pandas, LLM solo para redactar** | Dejar que el LLM sume o calcule porcentajes | Los LLM se equivocan en aritmética. La prueba exige operaciones verificables. |
+| **Validador de grounding post-LLM** | Confiar solo en el prompt | Un prompt reduce las alucinaciones pero no las elimina. El validador las detecta y elimina de forma determinista. |
+| **BM25 léxico en lugar de embeddings / base vectorial** | RAG con embeddings | El corpus es pequeño (4 documentos) y lleno de códigos exactos (`INV-01`, `SU-T-004`), donde BM25 es más preciso. Sin costos ni infraestructura extra, y totalmente reproducible. |
+| **Gemini (capa gratuita)** | Modelo local (Ollama) | No requiere GPU, soporta salida estructurada y *Function Calling* de forma nativa, y cumple la restricción de no contratar servicios pagos. |
+| **`thinking_level = "low"`** | Razonamiento por defecto | El modelo no necesita razonar en profundidad sobre los números porque ya vienen calculados. Así baja la latencia (~20 s → ~15 s) y se evitan respuestas truncadas. |
+| **Streamlit** | Frontend React + API | La prueba pide "una interfaz sencilla". Streamlit permite iterar rápido sin una capa de frontend aparte. |
+| **Configuración declarativa (`settings.toml`)** | Constantes en el código | Permite cambiar de dataset o de columnas sin tocar código (escenario de "cambio acotado" en la entrevista). |
+
+---
+
+## ⚠️ 8. Limitaciones Conocidas
+
+- **Dependencia de un LLM externo:** sin conexión o sin cuota de Gemini, el chat no responde, aunque el tablero cuantitativo (pestaña 2) sigue funcionando porque es 100% determinista. La capa gratuita tiene límites de solicitudes por minuto.
+- **El validador verifica cifras, no razonamientos:** garantiza que cada número de `hechos_comprobados` exista en el motor, pero no puede confirmar que una frase *interprete* correctamente esa cifra. Las hipótesis cualitativas se revisan por citas, no por valores.
+- **Filtrado agresivo:** si el modelo deriva una cifra correcta que el motor no calculó explícitamente (p. ej. una diferencia entre dos regiones), el validador la elimina. Se prioriza la ausencia de alucinaciones sobre la exhaustividad.
+- **Detección de *prompt injection* basada en patrones:** cubre las técnicas conocidas (homoglifos, leetspeak, etiquetas, jailbreaks), pero no garantiza inmunidad ante ataques nuevos. Por eso la defensa principal es arquitectónica: los datos no confiables nunca se tratan como instrucciones y los números nunca vienen del LLM.
+- **BM25 léxico:** no captura sinónimos lejanos (p. ej. "desabastecimiento" vs "quiebre de stock" si no comparten raíz). Es adecuado para este corpus, pero escalar a cientos de documentos requeriría búsqueda híbrida con embeddings.
+- **Estado en memoria y en un solo proceso:** el caché, los límites por sesión y el presupuesto diario (archivo local) están pensados para una demo de un solo usuario, no para un despliegue multiusuario. No hay autenticación de usuarios.
+- **Causalidad:** la aplicación no estima efectos causales (no hay datos de precios, promociones ni grupo de control). Solo puede señalar que la causalidad no está demostrada.

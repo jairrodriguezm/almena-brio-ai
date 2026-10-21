@@ -362,6 +362,87 @@ def test_smart_context_routing_and_token_reduction(
     assert "serie_mensual_Luma" in ctx2.get("consultas_dinamicas_adicionales", {})
 
 
+def test_grounding_ignores_formula_constants_and_keeps_true_facts(
+    data_engine: SalesDataEngine, doc_engine: DocumentSecurityEngine
+):
+    """Regresión: el '* 100' de la fórmula explícita no debe marcar como alucinado un hecho verdadero."""
+    comp = data_engine.compare_quarterly_sales(marca="Brio", group_by=["region"])
+    det_calls = [{"tool": "compare_quarterly_sales", "result": comp}]
+    fact = (
+        "Sur: T1 = $363.431.600 COP, T2 = $253.404.600 COP; Variación Absoluta = T2 - T1 = -$110.027.000 COP; "
+        "Variación % = ((T2 / T1) - 1) * 100 = -30,27%."
+    )
+    resp = {
+        "resumen_ejecutivo": "Sur lideró la caída.",
+        "hechos_comprobados": [fact],
+        "hipotesis_cualitativas": [],
+        "contradicciones_y_alertas": [],
+        "limites_y_evidencia_insuficiente": [],
+        "fuentes_citadas": ["02_Ventas_2026.csv"],
+    }
+    clean, rep = verify_epistemic_grounding(
+        resp, det_calls, [], ["02_Ventas_2026.csv"], set(), set(), set()
+    )
+    assert rep["verified"] is True, rep["unverified_numbers"]
+    assert clean["hechos_comprobados"] == [fact]
+    # Una cifra inventada en la misma frase sí debe seguir detectándose
+    _, rep_bad = verify_epistemic_grounding(
+        {**resp, "hechos_comprobados": [fact.replace("-30,27%", "-41,80%")]},
+        det_calls, [], ["02_Ventas_2026.csv"], set(), set(), set(),
+    )
+    assert rep_bad["verified"] is False
+
+
+def test_agent_repairs_truncated_json_and_skips_retry_on_auth_errors(
+    data_engine: SalesDataEngine, doc_engine: DocumentSecurityEngine, tmp_path: Path
+):
+    """Salida truncada (MAX_TOKENS) -> ronda de reparación; error 401/403 -> sin reintentos (no gasta cuota)."""
+    calls = [0]
+    good = EpistemicAnalysisResponse(
+        resumen_ejecutivo="Sur cayó -30.27%.",
+        hechos_comprobados=["Sur cayó -30.27% de $363.431.600 COP a $253.404.600 COP."],
+        hipotesis_cualitativas=[],
+        contradicciones_y_alertas=[],
+        limites_y_evidencia_insuficiente=[],
+        fuentes_citadas=["02_Ventas_2026.csv"],
+    )
+
+    class TruncThenOk:
+        def generate_content(self, model: str, contents: str, config: Any):
+            calls[0] += 1
+            if calls[0] == 1:
+                return type("R", (), {"parsed": None, "text": '{"resumen_ejecutivo": "Sur cay', "usage_metadata": None})()
+            return type("R", (), {"parsed": good, "text": good.model_dump_json(), "usage_metadata": None})()
+
+    agent = BrioEpistemicAgent(
+        data_engine=data_engine, doc_engine=doc_engine,
+        tracer=LLMOpsTracer(log_path=tmp_path / "t.jsonl"),
+        client_override=type("C", (), {"models": TruncThenOk()})(),
+    )
+    out = agent.ask("¿Qué región de Brío cayó más entre T1 y T2?", enforce_rate_limit=False)
+    assert calls[0] == 2
+    assert out["grounding"]["verified"] is True
+
+    auth_calls = [0]
+
+    class AuthError(Exception):
+        code = 403
+
+    class AlwaysForbidden:
+        def generate_content(self, model: str, contents: str, config: Any):
+            auth_calls[0] += 1
+            raise AuthError("PERMISSION_DENIED: API key not valid")
+
+    agent_bad = BrioEpistemicAgent(
+        data_engine=data_engine, doc_engine=doc_engine,
+        tracer=LLMOpsTracer(log_path=tmp_path / "t2.jsonl"),
+        client_override=type("C", (), {"models": AlwaysForbidden()})(),
+    )
+    with pytest.raises(RuntimeError):
+        agent_bad.ask("¿Qué región de Brío cayó más entre T1 y T2?", enforce_rate_limit=False)
+    assert auth_calls[0] == 1  # no se reintentó un error no transitorio
+
+
 @pytest.mark.skipif(
     not looks_like_api_key(os.getenv("GEMINI_API_KEY", "")),
     reason="Requiere GEMINI_API_KEY real para test de integración en vivo",

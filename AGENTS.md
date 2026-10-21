@@ -71,7 +71,7 @@ pip install -r requirements.txt
 ```
 
 ### Running Tests
-All 17 automated tests in `tests/test_suite.py` must pass before pushing any commit:
+All 19 automated tests in `tests/test_suite.py` must pass before pushing any commit:
 ```bash
 pytest -v
 ```

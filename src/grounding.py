@@ -189,6 +189,9 @@ def verify_epistemic_grounding(
         scrubbed = _RECORD_ID_RE.sub(" ", scrubbed)
         scrubbed = re.sub(r"\b20\d{2}-\d{2}\b", " ", scrubbed)
         scrubbed = re.sub(r"\b[TS][1-4]\b", " ", scrubbed)
+        # Eliminar constantes de fórmulas explícitas (p. ej. "(T2 / T1 - 1) * 100"): no son cifras de negocio
+        scrubbed = re.sub(r"[*×xX·]\s*100\b(?!\s*[.,]\d)", " ", scrubbed)
+        scrubbed = re.sub(r"[-−]\s*1\s*\)", ")", scrubbed)
 
         fact_has_unverified = False
         for m in _NUMBER_TOKEN_RE.finditer(scrubbed):

@@ -140,6 +140,10 @@ class BrioEpistemicAgent:
         self.max_tool_iterations = int(llm_cfg.get("max_tool_iterations", 4))
         self.request_timeout_s = int(llm_cfg.get("request_timeout_s", 90))
         self.max_retries = int(llm_cfg.get("max_retries", 3))
+        self.max_repair_rounds = int(llm_cfg.get("max_repair_rounds", 1))
+        # Nivel de razonamiento interno del modelo. Los cálculos son deterministas (Python),
+        # por lo que "low" reduce latencia/tokens sin afectar la exactitud numérica.
+        self.thinking_level = str(llm_cfg.get("thinking_level", "low") or "").strip().lower() or None
         self.max_question_chars = int(sec_cfg.get("max_question_chars", 800))
 
         self.rate_limiter = rate_limiter or SessionRateLimiter(
@@ -423,6 +427,22 @@ class BrioEpistemicAgent:
         ]
         return funcs, {f.__name__: f for f in funcs}
 
+    @staticmethod
+    def _is_transient_error(err: Exception) -> bool:
+        """Solo se reintentan errores transitorios (429, 5xx, timeouts). 400/401/403/404 fallan de inmediato
+        para no desperdiciar cuota ni tiempo con una API key inválida o una petición mal formada."""
+        code = getattr(err, "code", None) or getattr(err, "status_code", None)
+        try:
+            code = int(code) if code is not None else None
+        except (TypeError, ValueError):
+            code = None
+        if code is not None:
+            return code == 429 or code >= 500
+        msg = str(err).lower()
+        if any(t in msg for t in ("api key not valid", "permission_denied", "invalid_argument", "unauthenticated", "not_found")):
+            return False
+        return True
+
     def _call_gemini_with_retries(self, client: Any, contents: Any, config: Any) -> Any:
         last_err: Optional[Exception] = None
         for attempt in range(1, self.max_retries + 1):
@@ -434,10 +454,24 @@ class BrioEpistemicAgent:
                 )
             except Exception as err:
                 last_err = err
-                if attempt >= self.max_retries:
+                if attempt >= self.max_retries or not self._is_transient_error(err):
                     break
                 time.sleep(min(4.0, 0.6 * (2 ** (attempt - 1))))
-        raise RuntimeError(f"Error al invocar el modelo tras {self.max_retries} intentos: {redact_secrets(str(last_err))}")
+        raise RuntimeError(f"Error al invocar el modelo tras {attempt} intento(s): {redact_secrets(str(last_err))}")
+
+    @staticmethod
+    def _parse_structured_response(response: Any) -> "EpistemicAnalysisResponse":
+        """Valida la salida estructurada. Lanza ValueError si está vacía, truncada o no cumple el esquema."""
+        parsed = getattr(response, "parsed", None)
+        if parsed is not None and isinstance(parsed, BaseModel):
+            return EpistemicAnalysisResponse.model_validate(parsed.model_dump())
+        raw_text = getattr(response, "text", None)
+        if not raw_text:
+            raise ValueError("El modelo devolvió una respuesta vacía o bloqueada por políticas de seguridad.")
+        try:
+            return EpistemicAnalysisResponse.model_validate(json.loads(raw_text))
+        except Exception as err:  # JSON truncado (MAX_TOKENS) o esquema inválido
+            raise ValueError(f"Respuesta estructurada inválida o truncada: {type(err).__name__}") from err
 
     def ask(
         self,
@@ -530,12 +564,14 @@ class BrioEpistemicAgent:
 
         if self.client_override is not None:
             client = self.client_override
-            gen_config = {
-                "system_instruction": system_constitution,
-                "temperature": self.temperature,
-                "response_mime_type": "application/json",
-                "response_schema": EpistemicAnalysisResponse,
-            }
+
+            def make_config(max_tokens: int) -> Any:
+                return {
+                    "system_instruction": system_constitution,
+                    "temperature": self.temperature,
+                    "response_mime_type": "application/json",
+                    "response_schema": EpistemicAnalysisResponse,
+                }
         else:
             from google import genai
             from google.genai import types
@@ -544,24 +580,39 @@ class BrioEpistemicAgent:
                 api_key=api_key,
                 http_options=types.HttpOptions(timeout=self.request_timeout_s * 1000),
             )
-            gen_config = types.GenerateContentConfig(
-                system_instruction=system_constitution,
-                temperature=self.temperature,
-                max_output_tokens=self.max_output_tokens,
-                response_mime_type="application/json",
-                response_schema=EpistemicAnalysisResponse,
-                tools=tool_funcs if use_fc_tools else None,
-            )
 
-        response = self._call_gemini_with_retries(client, user_prompt, gen_config)
+            def make_config(max_tokens: int) -> Any:
+                return types.GenerateContentConfig(
+                    system_instruction=system_constitution,
+                    temperature=self.temperature,
+                    max_output_tokens=max_tokens,
+                    response_mime_type="application/json",
+                    response_schema=EpistemicAnalysisResponse,
+                    thinking_config=types.ThinkingConfig(thinking_level=self.thinking_level) if self.thinking_level else None,
+                    tools=tool_funcs if use_fc_tools else None,
+                    automatic_function_calling=(
+                        types.AutomaticFunctionCallingConfig(maximum_remote_calls=self.max_tool_iterations)
+                        if use_fc_tools
+                        else None
+                    ),
+                )
 
-        if getattr(response, "parsed", None) is not None and isinstance(response.parsed, BaseModel):
-            validated_model = EpistemicAnalysisResponse.model_validate(response.parsed.model_dump())
-        else:
-            raw_text = getattr(response, "text", None)
-            if not raw_text:
-                raise RuntimeError("El modelo devolvió una respuesta vacía o bloqueada por políticas de seguridad.")
-            validated_model = EpistemicAnalysisResponse.model_validate(json.loads(raw_text))
+        # Ronda de reparación: si la salida llega truncada (MAX_TOKENS) o no cumple el esquema,
+        # se reintenta con el doble de presupuesto de salida en lugar de mostrar un error al analista.
+        max_tokens = self.max_output_tokens
+        repair_rounds_used = 0
+        while True:
+            response = self._call_gemini_with_retries(client, user_prompt, make_config(max_tokens))
+            try:
+                validated_model = self._parse_structured_response(response)
+                break
+            except ValueError as parse_err:
+                if repair_rounds_used >= self.max_repair_rounds:
+                    raise RuntimeError(
+                        f"{parse_err} Intenta reformular la consulta de forma más acotada."
+                    ) from parse_err
+                repair_rounds_used += 1
+                max_tokens *= 2
 
         parsed_dict = validated_model.model_dump()
 
@@ -578,6 +629,11 @@ class BrioEpistemicAgent:
         }
         known_rids = {a["registro_id"] for a in self.data_engine.audit_log}
         known_sids = set(self.data_engine.known_values("punto_venta_id"))
+        # Incluir tiendas que solo aparecen en registros en cuarentena (p. ej. la del registro con venta 'N/D'):
+        # son IDs reales de la base auditada y pueden citarse al explicar el tratamiento de anomalías.
+        raw_df = getattr(self.data_engine, "df_raw", None)
+        if raw_df is not None and "punto_venta_id" in raw_df.columns:
+            known_sids |= set(raw_df["punto_venta_id"].dropna().astype(str).str.strip().unique())
 
         verified_dict, grounding_report = verify_epistemic_grounding(
             structured_response=parsed_dict,
