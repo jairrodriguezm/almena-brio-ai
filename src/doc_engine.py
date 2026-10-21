@@ -267,6 +267,7 @@ class DocumentSecurityEngine:
         query: str,
         top_k: int = 8,
         source_filter: Optional[str] = None,
+        min_score: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """
         Búsqueda BM25 con normalización de acentos, límites de palabra exactos ("sur" no coincide con "asegurar")
@@ -326,7 +327,25 @@ class DocumentSecurityEngine:
             scored.append((score, chunk))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [item[1] for item in scored[:top_k]]
+        top_items = scored[:top_k]
+        if min_score > 0.0 and len(top_items) > 4:
+            filtered = [item[1] for item in top_items if item[0] >= min_score]
+            if len(filtered) >= 4:
+                return filtered
+        return [item[1] for item in top_items]
+
+    @staticmethod
+    def compact_chunks_for_prompt(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Elimina metadatos internos innecesarios para ahorrar tokens en el prompt del LLM."""
+        return [
+            {
+                "source_file": c["source_file"],
+                "location": c["location"],
+                **({"evidence_ids": c["evidence_ids"]} if c.get("evidence_ids") else {}),
+                "text": c["text"],
+            }
+            for c in chunks
+        ]
 
     # ------------------------------------------------------------------
     # Extracción dinámica de metadatos desde los documentos (cero hardcoding)

@@ -79,6 +79,7 @@ class SalesDataEngine:
         self.dimensions: List[str] = []
         self.metrics: List[str] = []
         self.consistency_maps: Dict[str, Dict[str, str]] = {}
+        self._cache: Dict[str, Any] = {}
         self._load_and_audit()
 
     # ------------------------------------------------------------------
@@ -175,6 +176,7 @@ class SalesDataEngine:
         df = raw.copy()
         self.audit_log = []
         self.consistency_maps = {}
+        self._cache = {}
 
         # 1. Normalización dinámica de espacios y capitalización hacia la forma canónica mayoritaria
         text_cols = [self.id_col, self.period_col, *self.dimensions]
@@ -538,6 +540,18 @@ class SalesDataEngine:
         metric_col = self._normalize_metric(metric)
         group_cols = self._validate_dimensions(group_by or [self.config["analysis"].get("default_dimension", "region")])
 
+        cache_key = (
+            "compare_periods",
+            str(base_p),
+            str(comp_p),
+            tuple(group_cols),
+            tuple(sorted((str(k), str(v)) for k, v in (filters or {}).items())),
+            metric_col,
+            bool(use_clean_data),
+        )
+        if cache_key in self._cache:
+            return dict(self._cache[cache_key])
+
         source_df = self.df_clean.copy() if use_clean_data else self._prepare_raw_for_comparison()
         source_df = self._apply_filters(source_df, filters, use_clean_data=use_clean_data)
 
@@ -601,7 +615,7 @@ class SalesDataEngine:
             if metric_col == "venta_neta_cop_num"
             else metric_col
         )
-        return {
+        out_dict = {
             "periodo_base": base_lbl,
             "periodo_comparacion": comp_lbl,
             "filtros": filters or {},
@@ -616,6 +630,8 @@ class SalesDataEngine:
             "total_variacion_pct": _r(tot_pct) or 0.0,
             "filas": filas,
         }
+        self._cache[cache_key] = out_dict
+        return dict(out_dict)
 
     def compare_quarterly_sales(
         self,

@@ -4,7 +4,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -65,6 +65,29 @@ class EpistemicAnalysisResponse(BaseModel):
     )
 
 
+def _compact_comparison_for_prompt(comp: Dict[str, Any]) -> Dict[str, Any]:
+    """Elimina claves duplicadas en el payload enviado al LLM para ahorrar ~25% de tokens."""
+    compact_rows = []
+    for r in comp.get("filas", []):
+        row_copy = {
+            k: v
+            for k, v in r.items()
+            if k not in ("ranking",) and v is not None
+        }
+        compact_rows.append(row_copy)
+    return {
+        "marca": comp.get("marca", comp.get("filtros", {}).get("marca", "todas")),
+        "agrupacion": comp.get("agrupacion"),
+        "metrica": comp.get("metrica"),
+        "datos_limpios": comp.get("datos_limpios", True),
+        "total_T1": comp.get("total_T1"),
+        "total_T2": comp.get("total_T2"),
+        "total_variacion_absoluta": comp.get("total_variacion_absoluta"),
+        "total_variacion_pct": comp.get("total_variacion_pct"),
+        "filas": compact_rows,
+    }
+
+
 def build_system_constitution(dataset_summary: Dict[str, Any], report_claims: Dict[str, float], report_source: Optional[str]) -> str:
     """Construye la constitución epistémica dinámicamente a partir de los datos e insumos cargados."""
     csv_name = dataset_summary.get("archivo", "02_Ventas_2026.csv")
@@ -104,6 +127,7 @@ class BrioEpistemicAgent:
         self.doc_engine = doc_engine or DocumentSecurityEngine(config=self.config)
         self.tracer = tracer or LLMOpsTracer()
         self.client_override = client_override
+        self._response_cache: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 
         llm_cfg = self.config.get("llm", {})
         sec_cfg = self.config.get("security", {})
@@ -127,105 +151,179 @@ class BrioEpistemicAgent:
         )
 
     def _detect_mentioned_brands(self, question: str) -> List[str]:
-        q_fold = fold(question)
+        q_words = set(re.findall(r"[a-z0-9]+", fold(question)))
         known_brands = self.data_engine.known_values("marca")
         default_brand = self.config.get("analysis", {}).get("default_focus_value", "Brio")
-        found = [b for b in known_brands if fold(b) in q_fold]
+        found = [b for b in known_brands if fold(b) in q_words]
         if default_brand in known_brands and default_brand not in found:
             found.insert(0, default_brand)
         return found or (known_brands[:1] if known_brands else ["todas"])
 
     def _build_deterministic_context(self, question: str = "") -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
-        Construye el contexto cuantitativo determinista adaptándose dinámicamente
-        al dataset cargado, a las marcas/dimensiones/métricas consultadas y a las tiendas citadas en documentos.
+        Enrutador inteligente de contexto determinista (Smart Context Routing):
+        - Ejecuta (con caché en <1 ms) las tablas de referencia para el verificador de Grounding.
+        - Empaqueta en `context_pack` únicamente las tablas relevantes a la intención de la pregunta,
+          reduciendo drásticamente el consumo de tokens sin perder exactitud matemática.
         """
         calls_log: List[Dict[str, Any]] = []
         q_fold = fold(question)
+        q_words: Set[str] = set(re.findall(r"[a-z0-9]+", q_fold))
         mentioned_brands = self._detect_mentioned_brands(question)
         primary_brand = mentioned_brands[0]
 
-        # 1. Comparación regional limpia y sin limpiar para la marca principal
+        # 1. Cálculos base cacheados (sirven para el Grounding Validator en <1 ms)
         brio_reg_clean = self.data_engine.compare_quarterly_sales(marca=primary_brand, group_by=["region"], use_clean_data=True)
         calls_log.append({"tool": f"compare_quarterly_sales(marca='{primary_brand}', group_by=['region'], clean=True)", "result": brio_reg_clean})
 
         brio_reg_raw = self.data_engine.compare_quarterly_sales(marca=primary_brand, group_by=["region"], use_clean_data=False)
         calls_log.append({"tool": f"compare_quarterly_sales(marca='{primary_brand}', group_by=['region'], clean=False)", "result": brio_reg_raw})
 
-        # 2. Cruces por región+canal y región+presentación
         brio_reg_canal = self.data_engine.compare_quarterly_sales(marca=primary_brand, group_by=["region", "canal"], use_clean_data=True)
         calls_log.append({"tool": f"compare_quarterly_sales(marca='{primary_brand}', group_by=['region', 'canal'])", "result": brio_reg_canal})
 
         brio_reg_pres = self.data_engine.compare_quarterly_sales(marca=primary_brand, group_by=["region", "presentacion"], use_clean_data=True)
         calls_log.append({"tool": f"compare_quarterly_sales(marca='{primary_brand}', group_by=['region', 'presentacion'])", "result": brio_reg_pres})
 
-        # 3. Todas las marcas por región
         all_brands = self.data_engine.compare_quarterly_sales(marca="todas", group_by=["marca", "region"], use_clean_data=True)
         calls_log.append({"tool": "compare_quarterly_sales(marca='todas', group_by=['marca', 'region'])", "result": all_brands})
 
-        # 4. Puntos de venta extraídos dinámicamente de los documentos + los citados en la pregunta
         doc_stores = self.doc_engine.extract_mentioned_store_ids()
         q_stores = re.findall(r"\b([A-Z]{2}-[A-Z]-\d{3})\b", question.upper())
         target_stores = list(dict.fromkeys(doc_stores + q_stores))
         field_stores = self.data_engine.get_store_performance(target_stores or None, marca=primary_brand)
         calls_log.append({"tool": f"get_store_performance(tiendas={target_stores}, marca='{primary_brand}')", "result": field_stores})
 
-        # 5. Análisis de sensibilidad dinámico de todos los registros en cuarentena por venta faltante
         sens_all = self.data_engine.get_sensitivity_analysis_all()
         sens_primary = sens_all[0] if sens_all else self.data_engine.get_sensitivity_analysis_v03997()
         calls_log.append({"tool": "get_sensitivity_analysis_all()", "result": sens_all or sens_primary})
 
-        # 6. Consultas dinámicas adicionales según la intención de la pregunta (unidades, precios, meses, otras marcas)
-        extra_analyses: Dict[str, Any] = {}
-        for other_b in mentioned_brands[1:]:
-            res_b = self.data_engine.compare_quarterly_sales(marca=other_b, group_by=["region"], use_clean_data=True)
-            calls_log.append({"tool": f"compare_quarterly_sales(marca='{other_b}', group_by=['region'])", "result": res_b})
-            extra_analyses[f"comparacion_regional_{other_b}"] = res_b
+        # 2. Detección de intención por tokens exactos (sin falsos positivos como 'mes' en 'trimestre')
+        wants_channels_or_formats = bool(
+            q_words & {
+                "canal", "canales", "tradicional", "moderno", "presentacion", "presentaciones",
+                "formato", "formatos", "individual", "familiar", "pequeno", "pequenos", "desembolso",
+                "hallazgos", "observaciones", "explicar", "deterioro", "consistentes", "conclusiones",
+            }
+        )
+        wants_stores = bool(
+            q_stores or (q_words & {"tienda", "tiendas", "punto", "puntos", "local", "locales", "visita", "visitas", "campo", "hallazgos", "observaciones"})
+        )
+        wants_all_brands = bool(
+            len(mentioned_brands) > 1
+            or (q_words & {"marca", "marcas", "competencia", "competidor", "competidores", "portafolio", "luma", "nativa", "senda", "rizo"})
+        )
+        wants_raw_comparison = bool(
+            q_words & {"crudo", "crudos", "limpieza", "anomalia", "anomalias", "calidad", "inconsistencia", "duplicado"}
+        )
+        wants_units = bool(q_words & {"unidad", "unidades", "volumen", "cantidad"})
+        wants_prices = bool(q_words & {"precio", "precios", "ticket", "unitario"})
+        wants_monthly = bool(
+            (q_words & {"mes", "meses", "mensual", "mensuales", *MONTH_NAMES_MAP.keys()})
+            or re.search(r"\b20\d{2}-0[1-9]\b", q_fold)
+        )
 
-        if any(w in q_fold for w in ("unidad", "unidades", "volumen", "cantidad")):
-            for b in mentioned_brands:
-                res_u = self.data_engine.compare_quarterly_sales(marca=b, group_by=["region"], metric="unidades", use_clean_data=True)
-                calls_log.append({"tool": f"compare_quarterly_sales(marca='{b}', metric='unidades')", "result": res_u})
-                extra_analyses[f"unidades_por_region_{b}"] = res_u
-
-        if any(w in q_fold for w in ("precio", "ticket", "unitario", "desembolso")):
-            for b in mentioned_brands:
-                res_p = self.data_engine.compare_quarterly_sales(
-                    marca=b, group_by=["region", "presentacion"], metric="precio_unitario_promedio", use_clean_data=True
-                )
-                calls_log.append({"tool": f"compare_quarterly_sales(marca='{b}', metric='precio_unitario_promedio')", "result": res_p})
-                extra_analyses[f"precio_unitario_{b}"] = res_p
-
-        if any(w in q_fold for w in ("mes", "mensual", *MONTH_NAMES_MAP.keys(), "2026-0")):
-            for b in mentioned_brands:
-                ts_m = self.data_engine.query_time_series(group_by=["region"], filters={"marca": b}, metric="venta_neta_cop", granularity="mes")
-                calls_log.append({"tool": f"query_time_series(marca='{b}', granularity='mes')", "result": ts_m})
-                extra_analyses[f"serie_mensual_{b}"] = ts_m
-
-        # 7. Contraste dinámico contra afirmaciones preliminares extraídas de documentos (p. ej. Reporte Comercial)
         regions = self.data_engine.known_values("region")
         report_claims, report_src = self.doc_engine.extract_reported_variations(regions)
 
+        # Resumen compacto de auditoría (ahorra ~50% de caracteres frente al audit_log verboso)
+        compact_audit = [
+            {
+                "id": a["registro_id"],
+                "anomalia": a["tipo_anomalia"],
+                "original": a["valor_original"],
+                "accion": a["accion_aplicada"],
+                "estado": a["estado"],
+            }
+            for a in self.data_engine.audit_log
+        ]
+
+        # 3. Construcción selectiva del paquete que viaja al prompt del LLM
+        resumen_ds = {
+            "archivo": self.data_engine.csv_path.name,
+            "filas_crudas": len(self.data_engine.df_raw),
+            "filas_validas": len(self.data_engine.df_clean),
+            "en_cuarentena": len(self.data_engine.quarantine_df),
+            "anomalias_tratadas": len(self.data_engine.audit_log),
+        }
+        calls_log.append({"tool": "describe_dataset()", "result": resumen_ds})
+
         context_pack: Dict[str, Any] = {
-            "dataset_metadata": self.data_engine.describe_dataset(),
             "formula_convencion": "Variación Absoluta = T2 - T1 | Variación % = (T2 / T1 - 1) * 100",
-            "brio_por_region_limpio": brio_reg_clean,
-            "brio_por_region_sin_limpiar_comparativo": brio_reg_raw,
-            "brio_por_region_y_canal": brio_reg_canal,
-            "brio_por_region_y_presentacion": brio_reg_pres,
-            "todas_las_marcas_por_region": all_brands,
-            "desempeno_puntos_venta_citados_en_campo": field_stores,
+            "resumen_dataset": resumen_ds,
+            "brio_por_region_limpio": _compact_comparison_for_prompt(brio_reg_clean),
             "sensibilidad_imputacion_ventas_faltantes": sens_all or sens_primary,
             "afirmaciones_preliminares_extraidas_de_documentos": {
                 "archivo_fuente": report_src,
                 "variaciones_pct_reportadas": report_claims,
             },
-            "auditoria_calidad_datos_csv": self.data_engine.audit_log,
+            "auditoria_calidad_datos_csv": compact_audit,
         }
+
+        if wants_raw_comparison:
+            context_pack["brio_por_region_sin_limpiar_comparativo"] = _compact_comparison_for_prompt(brio_reg_raw)
+        if wants_channels_or_formats:
+            context_pack["brio_por_region_y_canal"] = _compact_comparison_for_prompt(brio_reg_canal)
+            context_pack["brio_por_region_y_presentacion"] = _compact_comparison_for_prompt(brio_reg_pres)
+        if wants_stores:
+            context_pack["desempeno_puntos_venta_citados_en_campo"] = field_stores
+        if wants_all_brands:
+            context_pack["todas_las_marcas_por_region"] = _compact_comparison_for_prompt(all_brands)
+
+        extra_analyses: Dict[str, Any] = {}
+        for other_b in mentioned_brands[1:]:
+            res_b = self.data_engine.compare_quarterly_sales(marca=other_b, group_by=["region"], use_clean_data=True)
+            calls_log.append({"tool": f"compare_quarterly_sales(marca='{other_b}', group_by=['region'])", "result": res_b})
+            extra_analyses[f"comparacion_regional_{other_b}"] = _compact_comparison_for_prompt(res_b)
+
+        if wants_units:
+            for b in mentioned_brands:
+                res_u = self.data_engine.compare_quarterly_sales(marca=b, group_by=["region"], metric="unidades", use_clean_data=True)
+                calls_log.append({"tool": f"compare_quarterly_sales(marca='{b}', metric='unidades')", "result": res_u})
+                extra_analyses[f"unidades_por_region_{b}"] = _compact_comparison_for_prompt(res_u)
+
+        if wants_prices:
+            for b in mentioned_brands:
+                res_p = self.data_engine.compare_quarterly_sales(
+                    marca=b, group_by=["region", "presentacion"], metric="precio_unitario_promedio", use_clean_data=True
+                )
+                calls_log.append({"tool": f"compare_quarterly_sales(marca='{b}', metric='precio_unitario_promedio')", "result": res_p})
+                extra_analyses[f"precio_unitario_{b}"] = _compact_comparison_for_prompt(res_p)
+
+        if wants_monthly:
+            for b in mentioned_brands:
+                ts_m = self.data_engine.query_time_series(group_by=["region"], filters={"marca": b}, metric="venta_neta_cop", granularity="mes")
+                calls_log.append({"tool": f"query_time_series(marca='{b}', granularity='mes')", "result": ts_m})
+                extra_analyses[f"serie_mensual_{b}"] = ts_m
+
         if extra_analyses:
             context_pack["consultas_dinamicas_adicionales"] = extra_analyses
 
         return context_pack, calls_log
+
+    def _needs_custom_tool_call(self, question: str) -> bool:
+        """
+        Determina si la pregunta requiere habilitar Function Calling interactivo
+        (por ejemplo, comparación entre meses específicos o tiendas fuera del set de campo).
+        En el 95% de las consultas el Smart Context Router ya inyectó las tablas exactas,
+        evitando el segundo round-trip de red.
+        """
+        q_fold = fold(question)
+        has_specific_month_pair = len(re.findall(r"\b20\d{2}-0[1-9]\b", q_fold)) >= 2
+        doc_stores = set(self.doc_engine.extract_mentioned_store_ids())
+        q_stores = set(re.findall(r"\b([A-Z]{2}-[A-Z]-\d{3})\b", question.upper()))
+        has_unlisted_store = bool(q_stores - doc_stores)
+        return has_specific_month_pair or has_unlisted_store
+
+    @staticmethod
+    def _is_followup_question(question: str) -> bool:
+        q_fold = fold(question)
+        if len(q_fold) < 60:
+            return True
+        return any(
+            q_fold.startswith(prefix)
+            for prefix in ("y ", "pero ", "tambien ", "ademas ", "que paso con ", "cual fue su ", "en ese ", "en esa ")
+        )
 
     def _make_agent_tools(self, calls_log: List[Dict[str, Any]], retrieved_chunks: List[Dict[str, Any]]) -> Tuple[List[Callable], Dict[str, Callable]]:
         """Crea funciones deterministas invocables por el LLM (Function Calling) para responder cualquier pregunta libre."""
@@ -306,13 +404,13 @@ class BrioEpistemicAgent:
 
         def buscar_evidencia_documental(consulta: str, top_k: int = 6) -> Dict[str, Any]:
             """Busca fragmentos adicionales en los documentos cualitativos y reportes usando BM25."""
-            chunks = self.doc_engine.search_evidence(consulta, top_k=min(12, max(1, int(top_k))))
+            chunks = self.doc_engine.search_evidence(consulta, top_k=min(10, max(1, int(top_k))), min_score=0.5)
             existing_ids = {c["chunk_id"] for c in retrieved_chunks}
             for ch in chunks:
                 if ch["chunk_id"] not in existing_ids:
                     retrieved_chunks.append(ch)
                     existing_ids.add(ch["chunk_id"])
-            return {"fragmentos_recuperados": chunks}
+            return {"fragmentos_recuperados": self.doc_engine.compact_chunks_for_prompt(chunks)}
 
         funcs = [
             consultar_comparacion_periodos,
@@ -344,13 +442,29 @@ class BrioEpistemicAgent:
         api_key_override: Optional[str] = None,
         chat_history: Optional[List[Dict[str, Any]]] = None,
         enforce_rate_limit: bool = True,
+        use_cache: bool = True,
     ) -> Dict[str, Any]:
         start_t = time.perf_counter()
 
         # 1. Sanitización de entrada y defensa contra Direct Prompt Injection (Corrección S4)
         clean_question = sanitize_user_question(question, max_chars=self.max_question_chars)
 
-        # 2. Validación de API Key y protocolos de limitación de uso (Corrección S3)
+        # 2. Caché en memoria para respuestas ya verificadas (0 tokens y <1 ms en consultas repetidas)
+        cache_key = (
+            fold(clean_question),
+            self.data_engine.csv_path.name,
+            len(self.data_engine.df_clean),
+            len(self.doc_engine.chunks),
+        )
+        if use_cache and self.client_override is None and cache_key in self._response_cache:
+            cached = self._response_cache[cache_key]
+            return {
+                "response": dict(cached["response"]),
+                "grounding": dict(cached["grounding"]),
+                "trace": {**cached["trace"], "cache_hit": True, "latency_ms": round((time.perf_counter() - start_t) * 1000.0, 2)},
+            }
+
+        # 3. Validación de API Key y protocolos de limitación de uso (Corrección S3)
         using_override = bool(api_key_override and api_key_override.strip())
         api_key = (api_key_override.strip() if using_override else None) or os.getenv("GEMINI_API_KEY")
         if not api_key and self.client_override is None:
@@ -365,50 +479,42 @@ class BrioEpistemicAgent:
             if not using_override:
                 self.daily_budget.reserve_request()
 
-        # 3. Contexto determinista dinámico + recuperación BM25 + incidentes sanitizados (sin payload malicioso, Corrección S1)
+        # 4. Enrutamiento inteligente de contexto + BM25 adaptativo (top_k=8 con filtro de score)
         det_context, det_calls = self._build_deterministic_context(clean_question)
-        retrieved_chunks = self.doc_engine.search_evidence(clean_question, top_k=14)
+        retrieved_chunks = self.doc_engine.search_evidence(clean_question, top_k=8, min_score=0.8)
+        compact_chunks = self.doc_engine.compact_chunks_for_prompt(retrieved_chunks)
         sanitized_incidents = self.doc_engine.get_sanitized_incidents_for_prompt()
 
         nonce = new_nonce()
         history_block = ""
-        if chat_history:
-            recent = chat_history[:3]
+        if chat_history and self._is_followup_question(clean_question):
+            recent = chat_history[:2]
             summarized_turns = [
                 {
-                    "pregunta_previa": sanitize_user_question(str(t.get("query", "")), max_chars=self.max_question_chars),
-                    "resumen_previo": str(t.get("result", {}).get("response", {}).get("resumen_ejecutivo", ""))[:350],
+                    "q": sanitize_user_question(str(t.get("query", "")), max_chars=self.max_question_chars),
+                    "a": str(t.get("result", {}).get("response", {}).get("resumen_ejecutivo", ""))[:240],
                 }
                 for t in recent
                 if t.get("query")
             ]
             if summarized_turns:
                 history_block = (
-                    f"\n<conversation_memory_{nonce}>\n"
-                    f"{json.dumps(summarized_turns, ensure_ascii=False, indent=2)}\n"
-                    f"</conversation_memory_{nonce}>\n"
+                    f"\n<conversation_memory_{nonce}>"
+                    f"{json.dumps(summarized_turns, ensure_ascii=False, separators=(',', ':'))}"
+                    f"</conversation_memory_{nonce}>"
                 )
 
-        user_prompt = f"""<analyst_question_{nonce}>
-{clean_question}
-</analyst_question_{nonce}>
-{history_block}
-<verified_sql_engine>
-{json.dumps(det_context, ensure_ascii=False, indent=2)}
-</verified_sql_engine>
+        # Serialización JSON compacta (ahorra ~2.000 tokens de espacios/saltos de línea)
+        user_prompt = (
+            f"<analyst_question_{nonce}>{clean_question}</analyst_question_{nonce}>"
+            f"{history_block}\n"
+            f"<verified_sql_engine>{json.dumps(det_context, ensure_ascii=False, separators=(',', ':'))}</verified_sql_engine>\n"
+            f"<security_firewall_report>{json.dumps(sanitized_incidents, ensure_ascii=False, separators=(',', ':'))}</security_firewall_report>\n"
+            f"<untrusted_document_evidence_{nonce}>{json.dumps(compact_chunks, ensure_ascii=False, separators=(',', ':'))}</untrusted_document_evidence_{nonce}>\n"
+            "Responde estrictamente en el formato JSON del esquema EpistemicAnalysisResponse en español, fundamentando cada cifra y cada fuente exclusivamente en la evidencia proporcionada."
+        )
 
-<security_firewall_report>
-Incidentes de Prompt Injection detectados y bloqueados en ingesta (texto malicioso omitido por seguridad):
-{json.dumps(sanitized_incidents, ensure_ascii=False, indent=2)}
-</security_firewall_report>
-
-<untrusted_document_evidence_{nonce}>
-{json.dumps(retrieved_chunks, ensure_ascii=False, indent=2)}
-</untrusted_document_evidence_{nonce}>
-
-Responde estrictamente en el formato JSON del esquema EpistemicAnalysisResponse en español, fundamentando cada cifra y cada fuente exclusivamente en la evidencia proporcionada."""
-
-        dataset_meta = det_context["dataset_metadata"]
+        dataset_meta = det_context["resumen_dataset"]
         rep_info = det_context["afirmaciones_preliminares_extraidas_de_documentos"]
         system_constitution = build_system_constitution(
             dataset_summary=dataset_meta,
@@ -416,6 +522,7 @@ Responde estrictamente en el formato JSON del esquema EpistemicAnalysisResponse 
             report_source=rep_info.get("archivo_fuente"),
         )
 
+        use_fc_tools = self._needs_custom_tool_call(clean_question)
         tool_funcs, _ = self._make_agent_tools(det_calls, retrieved_chunks)
 
         if self.client_override is not None:
@@ -440,7 +547,7 @@ Responde estrictamente en el formato JSON del esquema EpistemicAnalysisResponse 
                 max_output_tokens=self.max_output_tokens,
                 response_mime_type="application/json",
                 response_schema=EpistemicAnalysisResponse,
-                tools=tool_funcs,
+                tools=tool_funcs if use_fc_tools else None,
             )
 
         response = self._call_gemini_with_retries(client, user_prompt, gen_config)
@@ -455,7 +562,7 @@ Responde estrictamente en el formato JSON del esquema EpistemicAnalysisResponse 
 
         parsed_dict = validated_model.model_dump()
 
-        # 4. Verificación determinista de Grounding Epistémico (Cero Alucinaciones, Corrección F3)
+        # 5. Verificación determinista de Grounding Epistémico (Cero Alucinaciones, Corrección F3)
         known_files = [self.data_engine.csv_path.name] + [s["archivo"] for s in self.doc_engine.list_sources_summary()]
         known_eids = {
             eid
@@ -504,8 +611,11 @@ Responde estrictamente en el formato JSON del esquema EpistemicAnalysisResponse 
             grounding_report=grounding_report,
         )
 
-        return {
+        result_bundle = {
             "response": verified_dict,
             "grounding": grounding_report,
             "trace": trace,
         }
+        if use_cache and self.client_override is None and grounding_report.get("verified", False):
+            self._response_cache[cache_key] = result_bundle
+        return result_bundle

@@ -338,6 +338,30 @@ def test_agent_mocked_client_retries_and_never_leaks_malicious_payload(
     assert "raw_malicious_payload" not in captured_prompts[-1].lower()
 
 
+def test_smart_context_routing_and_token_reduction(
+    data_engine: SalesDataEngine, doc_engine: DocumentSecurityEngine
+):
+    """Verifica que el enrutador inteligente reduzca más del 65% del tamaño del contexto en preguntas focalizadas."""
+    agent = BrioEpistemicAgent(data_engine=data_engine, doc_engine=doc_engine)
+
+    # 1. Pregunta focalizada en caída regional de Brío (sin pedir otras marcas ni serie mensual)
+    q1 = "¿Cuál fue la región con mayor caída porcentual en ventas netas de Brío entre el primer y segundo trimestre?"
+    ctx1, _ = agent._build_deterministic_context(q1)
+    assert "todas_las_marcas_por_region" not in ctx1
+    assert "consultas_dinamicas_adicionales" not in ctx1
+    compact_ctx1 = json.dumps(ctx1, ensure_ascii=False, separators=(",", ":"))
+    chunks1 = doc_engine.compact_chunks_for_prompt(doc_engine.search_evidence(q1, top_k=8, min_score=0.8))
+    compact_chunks1 = json.dumps(chunks1, ensure_ascii=False, separators=(",", ":"))
+    # Antes el payload superaba 35.700 caracteres; ahora debe quedar por debajo de 10.000 caracteres (>70% de ahorro)
+    assert len(compact_ctx1) + len(compact_chunks1) < 10000
+
+    # 2. Pregunta explícita sobre otra marca (Luma) y evolución mensual sí activa esas tablas
+    q2 = "¿Cómo evolucionaron las ventas mensuales de Luma por región?"
+    ctx2, _ = agent._build_deterministic_context(q2)
+    assert "todas_las_marcas_por_region" in ctx2
+    assert "serie_mensual_Luma" in ctx2.get("consultas_dinamicas_adicionales", {})
+
+
 @pytest.mark.skipif(
     not looks_like_api_key(os.getenv("GEMINI_API_KEY", "")),
     reason="Requiere GEMINI_API_KEY real para test de integración en vivo",

@@ -36,6 +36,9 @@ if "custom_data_engine" not in st.session_state:
 if "custom_doc_engine" not in st.session_state:
     st.session_state.custom_doc_engine = None
 
+if "agent_response_cache" not in st.session_state:
+    st.session_state.agent_response_cache = {}
+
 data_engine: SalesDataEngine = st.session_state.custom_data_engine or base_data_engine
 doc_engine: DocumentSecurityEngine = st.session_state.custom_doc_engine or base_doc_engine
 agent = BrioEpistemicAgent(
@@ -44,6 +47,7 @@ agent = BrioEpistemicAgent(
     tracer=llmops_tracer,
     rate_limiter=st.session_state.session_rate_limiter,
 )
+agent._response_cache = st.session_state.agent_response_cache
 
 # Barra lateral de configuración, seguridad y carga dinámica de fuentes
 with st.sidebar:
@@ -185,10 +189,13 @@ with tab_chat:
             st.markdown(f"### 🧑 Analista: *{q}*")
             if gr:
                 g_score = gr.get("grounding_score_pct", 100.0)
+                tok_in = tr.get("token_usage", {}).get("prompt_tokens", 0)
+                cache_badge = " · ⚡ `Caché Hit (0 tokens)`" if tr.get("cache_hit") else (f" · 🪙 `Prompt: {tok_in:,} tokens`" if tok_in else "")
                 st.caption(
                     f"🛡️ **Grounding Verificado:** `{g_score}%` · "
                     f"Cifras comprobadas: `{gr.get('verified_numbers_count', 0)}` · "
                     f"Citas verificadas: `{len(gr.get('verified_citations', []))}`"
+                    f"{cache_badge}"
                 )
             st.info(f"**🎯 Síntesis Ejecutiva:**\n\n{res['resumen_ejecutivo']}")
 
