@@ -1,16 +1,17 @@
-# 🧠 Almena Foods — Copiloto Analítico Epistémico (Caso Brío 2026)
+# 📊 Almena Foods — Asistente de Análisis Comercial con IA (Caso Brío 2026)
 
-![Tests](https://img.shields.io/badge/Pytest-19%2F19%20Passing-22c55e?style=flat-square)
+![Tests](https://img.shields.io/badge/Pytest-23%2F23%20Passing-22c55e?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-38bdf8?style=flat-square)
-![Grounding](https://img.shields.io/badge/Grounding-Cero%20Alucinaciones%20(100%25)-a855f7?style=flat-square)
-![Security](https://img.shields.io/badge/Firewall-Anti--Prompt%20Injection%20Directo%20e%20Indirecto-ef4444?style=flat-square)
-![Design](https://img.shields.io/badge/Arquitectura-100%25%20Din%C3%A1mica%20(Cero%20Hardcoding)-f59e0b?style=flat-square)
+![Grounding](https://img.shields.io/badge/Verificaci%C3%B3n-Cifras%20y%20Citas%20Auditadas-a855f7?style=flat-square)
+![Security](https://img.shields.io/badge/Seguridad-Filtro%20Anti--Prompt%20Injection-ef4444?style=flat-square)
+![Design](https://img.shields.io/badge/Configuraci%C3%B3n-Declarativa%20(settings.toml)-f59e0b?style=flat-square)
 
-Aplicación de **Inteligencia Artificial Neuro-Simbólica** diseñada para analizar el desempeño comercial de la marca **Brío** (y de todo el portafolio de **Almena Foods**: *Brío, Luma, Nativa, Senda y Rizo*) durante el primer semestre de 2026, integrando datos transaccionales (`CSV`) con evidencia documental multi-formato (`PDF`, `DOCX`, `Markdown`, `TXT`).
+Aplicación en Python y Streamlit diseñada para analizar el desempeño comercial de la marca **Brío** (y del portafolio de **Almena Foods**: *Brío, Luma, Nativa, Senda y Rizo*) durante el primer semestre de 2026, combinando cálculos verificables sobre la base de ventas (`CSV`) con búsqueda documental (`PDF`, `DOCX`, `Markdown`, `TXT`) y síntesis mediante **Google Gemini**.
 
-> 💡 **Diseñado para dos audiencias:**
-> - **Para Negocio / Ejecutivos (No Técnicos):** Lee la [Sección 1 (Resumen Ejecutivo en 2 minutos)](#-1-resumen-ejecutivo-para-perfiles-no-técnicos--negocio) para entender qué problema resuelve, qué descubrió en los datos de Brío y por qué sus respuestas son 100% confiables.
-> - **Para Ingeniería / Ciencia de Datos / Seguridad (Técnicos):** Revisa la [Sección 2 (Arquitectura Interactiva)](#-2-arquitectura-del-sistema-diagramas-interactivos) y la [Sección 3 (Profundización Técnica)](#-3-profundización-técnica-para-entrevistadores-técnicos) para conocer el motor determinista, el firewall quirúrgico anti-inyección, la búsqueda híbrida BM25, el Function Calling y el validador matemático post-LLM.
+> 💡 **Guía de lectura rápida:**
+> - **Resumen de negocio y hallazgos:** [Sección 1](#-1-resumen-ejecutivo-para-perfiles-no-técnicos--negocio) y [Matriz de Cumplimiento Quala](#-11-matriz-de-cumplimiento-de-la-prueba-técnica-quala).
+> - **Arquitectura y decisiones técnicas:** [Sección 2](#-2-arquitectura-del-sistema-diagramas-interactivos), [Sección 3](#-3-profundización-técnica-para-entrevistadores-técnicos) y [Sección 7](#-7-decisiones-técnicas-principales-y-por-qué).
+> - **Ejecución, pruebas y limitaciones conocidas:** [Sección 5](#-5-instalación-ejecución-y-pruebas-automatizadas-cicd) y [Sección 8](#-8-limitaciones-conocidas).
 
 ---
 
@@ -18,22 +19,20 @@ Aplicación de **Inteligencia Artificial Neuro-Simbólica** diseñada para anali
 
 ### ¿Cuál era el problema de negocio?
 El equipo comercial de **Almena Foods** observó una caída en las ventas de su marca **Brío** en el segundo trimestre de 2026 (`T2`: abril-junio) frente al primero (`T1`: enero-marzo). Para tomar decisiones tenían cuatro fuentes distintas:
-1. **`02_Ventas_2026.csv`**: La base real de 4.000 transacciones mensuales, pero con **errores de calidad ocultos** (duplicados, textos mal escritos, fechas inexistentes y valores faltantes).
+1. **`02_Ventas_2026.csv`**: La base real de 4.000 transacciones mensuales, pero con **inconsistencias de datos** (duplicados, textos mal escritos, fechas inexistentes y valores faltantes).
 2. **`03_Investigacion_Consumidor.pdf`**: Un estudio cualitativo basado en 24 entrevistas sobre percepciones de precio, formatos y disponibilidad.
-3. **`04_Observaciones_Canales.docx`**: Notas de 51 visitas de campo a tiendas, que además contenía **una instrucción maliciosa oculta (`OC-EXT-06`)** proveniente de un sistema externo para manipular a cualquier asistente de IA.
-4. **`05_Reporte_Comercial.pdf`**: Un informe preliminar que afirmaba erróneamente que la región **Centro (`-23%`)** tenía la peor caída y atribuía el **70% del deterioro** a promociones de la competencia sin pruebas estadísticas.
+3. **`04_Observaciones_Canales.docx`**: Notas de 51 visitas de campo a tiendas, que además incluía **una nota externa con instrucciones para manipular al asistente (`OC-EXT-06`)**.
+4. **`05_Reporte_Comercial.pdf`**: Un informe preliminar elaborado antes de conciliar la base que señalaba erróneamente a la región **Centro (`-23%`)** como la de mayor caída y atribuía el **70% del deterioro** a promociones de la competencia sin sustento estadístico.
 
-### ¿Cómo lo resuelve esta solución sin inventar nada?
-Un chatbot tradicional habría leído los documentos sin limpiar la base de datos, habría obedecido la trampa oculta en el Word o habría repetido el error del PDF preliminar. Esta solución implementa **4 candados de confiabilidad**:
-
-1. **La IA no hace cuentas de memoria (Motor Determinista):** Todas las sumas, restas, porcentajes y rankings los calcula un motor matemático exacto sobre el CSV limpio antes de que el modelo redacte la respuesta.
-2. **Limpieza Forense y Sensibilidad Transparente:** El sistema detecta y corrige automáticamente las **8 anomalías** del CSV y demuestra matemáticamente que incluso si se estimara el único registro con venta faltante (`V03997`), la conclusión comercial no cambia.
-3. **Separación Epistémica (Hechos vs. Hipótesis vs. Límites):** Cada respuesta se divide obligatoriamente en:
-   - ✅ **Hechos Comprobados:** Cifras verificadas en el CSV con su fórmula exacta.
-   - 💡 **Hipótesis Cualitativas:** Indicios de entrevistas y visitas a tiendas (que orientan, pero no prueban causalidad).
-   - ⚠️ **Contradicciones y Alertas:** Errores del reporte preliminar y ataques bloqueados.
-   - 🛑 **Evidencia Insuficiente:** Qué cosas **no** se pueden afirmar por falta de grupo de control o tamaño de muestra.
-4. **Auditor Automático Cero-Alucinaciones (Grounding Validator):** Antes de mostrar cualquier respuesta en pantalla, un verificador comprueba que cada número y cada código citado existan realmente en los datos.
+### ¿Cómo asegura la aplicación resultados confiables?
+1. **Los cálculos los hace Pandas, no el LLM:** Todas las sumas, variaciones absolutas, porcentajes y rankings se calculan en Python sobre el CSV limpio antes de que el modelo redacte la respuesta.
+2. **Limpieza explícita y análisis de sensibilidad:** El motor detecta y documenta las **8 anomalías** del CSV y verifica que incluso si se imputara el único registro de Brío con venta faltante (`V03997`), el ranking regional no cambia.
+3. **Separación entre hechos, hipótesis y límites:** Cada respuesta se estructura en cuatro bloques:
+   - ✅ **Hechos Comprobados:** Cifras calculadas en el CSV con su fórmula.
+   - 💡 **Hipótesis Cualitativas:** Hallazgos de entrevistas y visitas de campo (indicios, no pruebas causales).
+   - ⚠️ **Contradicciones y Alertas:** Diferencias frente al reporte preliminar e incidentes de datos/seguridad.
+   - 🛑 **Evidencia Insuficiente:** Qué conclusiones **no** se pueden afirmar por falta de grupo de control o diseño muestral.
+4. **Validador post-LLM (`grounding.py`):** Antes de mostrar la respuesta, un validador comprueba que cada número en el resumen ejecutivo y en los hechos comprobados coincida con las salidas del motor determinista, y que cada código citado exista en los documentos.
 
 ### Hallazgos Clave del Caso Brío (Verificados)
 
@@ -54,7 +53,7 @@ Un chatbot tradicional habría leído los documentos sin limpiar la base de dato
 | **B. Análisis comercial verificable** (sin delegar cálculos al LLM) | Todo cálculo (T1, T2, Δ, Δ%, participación, rankings) lo hace Pandas. El LLM solo redacta, y un validador post-LLM elimina cualquier cifra que no salga del motor. | [`data_engine.py`](file:///c:/jair/almena-brio-ai/src/data_engine.py), [`grounding.py`](file:///c:/jair/almena-brio-ai/src/grounding.py) |
 | **C. IA generativa real** (gratuita) | Google Gemini (capa gratuita de AI Studio) con salida estructurada (Pydantic) y *Function Calling* para consultas ad-hoc. | [`agent.py`](file:///c:/jair/almena-brio-ai/src/agent.py) |
 | **D. Evidencia y límites** (fuentes, contradicciones, causalidad no demostrada) | Esquema obligatorio: hechos comprobados / hipótesis / contradicciones / límites / fuentes. Citas a IDs reales (`INV-01`, `OC-SUR-01`, `REP-01`) verificadas contra el catálogo de documentos. | Pestaña 1 de la app, `EpistemicAnalysisResponse` |
-| **E. Ingeniería y confiabilidad** (código organizado, errores, credenciales, pruebas, consultas nuevas) | Módulos separados, reintentos solo ante errores transitorios, ronda de reparación ante JSON truncado, `.env` fuera del repo, redacción de secretos, límites de uso, 19 pruebas + CI. Sin respuestas fijas: cualquier pregunta nueva pasa por el mismo flujo. | [`tests/test_suite.py`](file:///c:/jair/almena-brio-ai/tests/test_suite.py), [`ci.yml`](file:///c:/jair/almena-brio-ai/.github/workflows/ci.yml), [evidencia](file:///c:/jair/almena-brio-ai/docs/evidencia_pruebas.txt) |
+| **E. Ingeniería y confiabilidad** (código organizado, errores, credenciales, pruebas, consultas nuevas) | Módulos separados, reintentos ante errores transitorios + modelo de respaldo (`gemini-2.5-flash`), reembolso de cuota si la llamada falla, ronda de reparación ante JSON truncado, `.env` fuera del repo, redacción de secretos, 23 pruebas + CI. Sin respuestas fijas: cualquier pregunta nueva pasa por el mismo flujo. | [`tests/test_suite.py`](file:///c:/jair/almena-brio-ai/tests/test_suite.py), [`ci.yml`](file:///c:/jair/almena-brio-ai/.github/workflows/ci.yml), [evidencia](file:///c:/jair/almena-brio-ai/docs/evidencia_pruebas.txt) |
 | **Consultas de referencia** (las 4 del enunciado) | Probadas en vivo con Gemini: las 4 responden correctamente con grounding verificado (ver sección 6). | Sección 6 |
 | **Modalidad de demostración** | **Ejecución local desde mi computador** (`streamlit run app.py`), proyectada en la entrevista. | Sección 5.2 |
 
@@ -63,32 +62,32 @@ Un chatbot tradicional habría leído los documentos sin limpiar la base de dato
 ## 🗺️ 2. Arquitectura del Sistema (Diagramas Interactivos)
 
 > 🖥️ **Vista Interactiva Clicable:**
-> - Dentro de la aplicación (`streamlit run app.py`), abre la **Pestaña 4 (`⚙️ Observabilidad LLMOps & Grounding`)** para explorar el diagrama interactivo con selector **Vista Negocio / Vista Técnica**.
+> - Dentro de la aplicación (`streamlit run app.py`), abre la **Pestaña 4 (`⚙️ Trazabilidad y Arquitectura`)** para explorar el diagrama interactivo con selector **Vista Negocio / Vista Técnica**.
 > - También puedes abrir directamente en cualquier navegador el archivo interactivo autónomo: [`docs/arquitectura_interactiva.html`](file:///c:/jair/almena-brio-ai/docs/arquitectura_interactiva.html).
 
-### 2.1. Diagrama de Flujo Neuro-Simbólico y Guardrails de Seguridad
+### 2.1. Diagrama de Flujo de Datos y Controles de Seguridad
 
 ```mermaid
 flowchart TD
     subgraph IN["1. Capa de Entrada y Configuracion Dinamica"]
         U["Analista / Usuario (Pregunta Libre o 1-Clic)"]
-        CFG["config/settings.toml (Esquema 100% Dinamico)"]
+        CFG["config/settings.toml (Esquema Configurable)"]
         UP["Cargador en Vivo (Nuevos CSV / PDF / DOCX / MD)"]
-        SEC_IN["Firewall de Entrada y Cuotas (src/security.py)<br/>- Bloqueo Direct Prompt Injection (NFKC/Homoglifos/Leet)<br/>- Delimitacion con Nonce criptografico<br/>- SessionRateLimiter y DailyUsageBudget"]
+        SEC_IN["Validacion de Entrada y Cuotas (src/security.py)<br/>- Filtro Prompt Injection (NFKC/Homoglifos/Leet)<br/>- Delimitadores unicos por consulta<br/>- SessionRateLimiter y DailyUsageBudget"]
     end
 
-    subgraph ENGINES["2. Motores Deterministas y Sanitizacion Documental"]
+    subgraph ENGINES["2. Motor Cuantitativo y Procesamiento Documental"]
         DATA["Motor Cuantitativo (src/data_engine.py)<br/>- Inferencia dinamica de dimensiones y prefijos<br/>- Limpieza auditada de las 8 anomalias del CSV<br/>- Calculo exacto T1 vs T2, series mensuales y tiendas<br/>- Analisis de sensibilidad en cuarentena (V03997)"]
-        DOC["Motor Documental (src/doc_engine.py)<br/>- Parseo seguro PDF, MD y DOCX (defusedxml)<br/>- Firewall Quirurgico: aisla OC-EXT-06 por linea<br/>  conservando limitaciones metodologicas adyacentes<br/>- Recuperacion hibrida BM25 + Entidades (sin tildes)"]
+        DOC["Motor Documental (src/doc_engine.py)<br/>- Parseo seguro PDF, MD y DOCX (defusedxml + limite ZIP)<br/>- Aislamiento por linea: retira OC-EXT-06<br/>  conservando limitaciones metodologicas adyacentes<br/>- Recuperacion BM25 + Entidades (sin tildes)"]
     end
 
-    subgraph AGENT["3. Sintesis Epistemica con Function Calling"]
+    subgraph AGENT["3. Orquestacion con LLM y Function Calling"]
         CTX["Contexto Verificado + Incidentes Sanitizados<br/>(SIN raw_malicious_payload en el prompt)"]
-        LLM["Agente Epistemico (src/agent.py - Gemini)<br/>- Herramientas deterministas via Function Calling<br/>- Memoria conversacional sanitizada<br/>- Reintentos con backoff exponencial y timeout<br/>- Esquema Pydantic: EpistemicAnalysisResponse"]
+        LLM["Agente Comercial (src/agent.py - Gemini)<br/>- Herramientas deterministas via Function Calling<br/>- Reintentos + Modelo de respaldo (gemini-2.5-flash)<br/>- Esquema Pydantic: EpistemicAnalysisResponse"]
     end
 
-    subgraph VERIFY["4. Verificacion Cero-Alucinaciones y Observabilidad"]
-        GRD["Grounding Validator (src/grounding.py)<br/>- Audita cada cifra en hechos_comprobados<br/>- Valida cada archivo e ID en fuentes_citadas<br/>- Filtra cualquier dato no respaldado (Score %)"]
+    subgraph VERIFY["4. Verificacion Post-LLM y Trazabilidad"]
+        GRD["Grounding Validator (src/grounding.py)<br/>- Audita cifras en resumen_ejecutivo y hechos_comprobados<br/>- Valida archivos e IDs en fuentes_citadas<br/>- Filtra cualquier dato no respaldado (Score %)"]
         OPS["LLMOps Tracer y UI (src/llmops.py / app.py)<br/>- Trazas JSONL con rotacion y redaccion de secretos<br/>- Tablero dinamico sin KPIs harcodeados"]
     end
 
@@ -201,12 +200,12 @@ almena-brio-ai/
 ├── src/
 │   ├── config.py                   # Cargador TOML y resolución de rutas independientes del cwd
 │   ├── text_utils.py               # Normalización Unicode, folding sin tildes, stemming y tokenización
-│   ├── security.py                 # Detector anti-injection multicapa, cuotas de API y redacción
-│   ├── data_engine.py              # Motor determinista dinámico, auditoría CSV y sensibilidad
-│   ├── doc_engine.py               # Ingesta segura PDF/DOCX/MD, aislamiento quirúrgico y BM25
-│   ├── grounding.py                # Verificador determinista post-LLM (Cero Alucinaciones)
-│   ├── agent.py                    # Orquestador Neuro-Simbólico, Function Calling y reintentos
-│   └── llmops.py                   # Telemetría estructurada JSONL con rotación automática
+│   ├── security.py                 # Filtro anti-injection, cuotas de API con reembolso en fallo y redacción
+│   ├── data_engine.py              # Motor determinista en Pandas, auditoría CSV y sensibilidad
+│   ├── doc_engine.py               # Ingesta segura PDF/DOCX/MD (con límites de tamaño/ZIP) y búsqueda BM25
+│   ├── grounding.py                # Validador determinista post-LLM de cifras y citas
+│   ├── agent.py                    # Orquestador con Gemini, Function Calling, reintentos y modelo de respaldo
+│   └── llmops.py                   # Registro de trazas JSONL con rotación automática
 ├── data/
 │   ├── 01_Contexto_Negocio.md      # Reglas de negocio y diccionario de datos
 │   ├── 02_Ventas_2026.csv          # 4.000 registros transaccionales (3.996 válidos + 8 anomalías)
@@ -214,7 +213,7 @@ almena-brio-ai/
 │   ├── 04_Observaciones_Canales.docx   # 51 visitas de campo (OC-*, CAM-*) + ataque OC-EXT-06
 │   └── 05_Reporte_Comercial.pdf    # Reporte preliminar con discrepancias (REP-01..06)
 ├── tests/
-│   └── test_suite.py               # 19 pruebas automatizadas (unitarias, seguridad, grounding y E2E)
+│   └── test_suite.py               # 23 pruebas automatizadas (unitarias, seguridad, grounding y E2E)
 └── .github/workflows/
     └── ci.yml                      # Pipeline CI en GitHub Actions (compilación + pytest)
 ```
@@ -302,7 +301,7 @@ cp .env.example .env
 streamlit run app.py
 ```
 
-### 5.3. Ejecutar la Suite de 19 Pruebas Automatizadas
+### 5.3. Ejecutar la Suite de 23 Pruebas Automatizadas
 
 ```bash
 pytest -v
@@ -322,13 +321,17 @@ La suite en [`tests/test_suite.py`](file:///c:/jair/almena-brio-ai/tests/test_su
 - **`test_smart_context_routing_and_token_reduction`**: Valida que las consultas generales enruten contextualmente solo las tablas necesarias (ahorro de ~40% en tokens) y que solo preguntas específicas activen series temporales completas.
 - **`test_grounding_ignores_formula_constants_and_keeps_true_facts`**: Regresión: el `* 100` de la fórmula explícita no debe invalidar un hecho verdadero, pero una cifra inventada en la misma frase sí se detecta.
 - **`test_agent_repairs_truncated_json_and_skips_retry_on_auth_errors`**: Si la salida llega truncada se hace una ronda de reparación; los errores 401/403 no se reintentan (no gastan cuota).
+- **`test_csv_cell_prompt_injection_quarantined_and_redacted`**: Verifica que si un CSV subido trae una celda con instrucciones maliciosas o etiquetas XML, la fila se aísla en cuarentena y su texto se redacta antes de llegar al prompt.
+- **`test_docx_zip_bomb_and_oversized_file_rejected`**: Verifica rechazo de extensiones no permitidas, límite de tamaño por archivo y protección contra bombas ZIP en `.docx` (`word/document.xml` descomprimido).
+- **`test_grounding_audits_resumen_ejecutivo_and_strips_hallucinated_sentence`**: Verifica que el validador también audite las cifras del `resumen_ejecutivo` y depure cualquier oración con números no respaldados.
+- **`test_fallback_model_and_quota_rollback_on_failure`**: Verifica conmutación automática al modelo de respaldo (`gemini-2.5-flash`) ante fallo del primario y reembolso de cuota si todos los modelos fallan.
 - **`test_live_epistemic_agent_resists_injection_and_answers_sur`**: Prueba E2E en vivo contra Gemini verificando respuesta correcta (`Sur`, `-30.27%`) y `grounding.verified == True`.
 
 ### 5.4. Integración Continua (GitHub Actions)
-El repositorio incluye el workflow [`.github/workflows/ci.yml`](file:///c:/jair/almena-brio-ai/.github/workflows/ci.yml), que en cada `push` o `pull_request` instala dependencias en Python 3.12, verifica la compilación sintáctica de todos los módulos y ejecuta la suite de `pytest`. En CI la prueba en vivo se omite automáticamente (no hay API key en el repositorio); las 18 pruebas restantes usan un cliente LLM simulado.
+El repositorio incluye el workflow [`.github/workflows/ci.yml`](file:///c:/jair/almena-brio-ai/.github/workflows/ci.yml), que en cada `push` o `pull_request` instala dependencias en Python 3.12, verifica la compilación sintáctica de todos los módulos y ejecuta la suite de `pytest`. En CI la prueba en vivo se omite automáticamente (no hay API key en el repositorio); las 22 pruebas restantes usan un cliente LLM simulado.
 
 ### 5.5. Evidencia de Ejecución
-La salida completa de la última ejecución local (19/19, incluida la prueba en vivo contra Gemini) está en [`docs/evidencia_pruebas.txt`](file:///c:/jair/almena-brio-ai/docs/evidencia_pruebas.txt). La pestaña de *Actions* de GitHub muestra el historial de ejecuciones de CI.
+La salida completa de la última ejecución local (23/23, incluida la prueba en vivo contra Gemini) está en [`docs/evidencia_pruebas.txt`](file:///c:/jair/almena-brio-ai/docs/evidencia_pruebas.txt). La pestaña de *Actions* de GitHub muestra el historial de ejecuciones de CI.
 
 ---
 

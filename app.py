@@ -4,34 +4,52 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
+from src.config import load_config
 from src.data_engine import SalesDataEngine
 from src.doc_engine import DocumentSecurityEngine
 from src.agent import BrioEpistemicAgent
 from src.llmops import LLMOpsTracer
-from src.security import RateLimitExceeded, SessionRateLimiter, UnsafeInputError, redact_secrets
+from src.security import AccessGate, RateLimitExceeded, SessionRateLimiter, UnsafeInputError, redact_secrets
 
 st.set_page_config(
-    page_title="Almena Foods | Brío Epistemic AI Analyst",
-    page_icon="🛡️",
+    page_title="Almena Foods | Analista Comercial IA (Caso Brío)",
+    page_icon="📊",
     layout="wide",
 )
 
 
 @st.cache_resource
 def init_default_engines():
-    data_eng = SalesDataEngine("data/02_Ventas_2026.csv")
-    doc_eng = DocumentSecurityEngine("data")
+    cfg = load_config()
+    data_eng = SalesDataEngine("data/02_Ventas_2026.csv", config=cfg)
+    doc_eng = DocumentSecurityEngine("data", config=cfg)
     tracer = LLMOpsTracer()
-    return data_eng, doc_eng, tracer
+    return cfg, data_eng, doc_eng, tracer
 
 
-base_data_engine, base_doc_engine, llmops_tracer = init_default_engines()
+app_cfg, base_data_engine, base_doc_engine, llmops_tracer = init_default_engines()
+sec_cfg = app_cfg.get("security", {})
+doc_cfg = app_cfg.get("documents", {})
+max_upload_bytes = int(doc_cfg.get("max_file_bytes", 10 * 1024 * 1024))
 
 if "session_rate_limiter" not in st.session_state:
-    st.session_state.session_rate_limiter = SessionRateLimiter(per_minute=6, max_total=40)
+    st.session_state.session_rate_limiter = SessionRateLimiter(
+        per_minute=int(sec_cfg.get("requests_per_minute_per_session", 10)),
+        max_total=int(sec_cfg.get("max_requests_per_session", 50)),
+    )
+
+if "access_gate" not in st.session_state:
+    code_env_name = sec_cfg.get("access_code_env", "APP_ACCESS_CODE")
+    st.session_state.access_gate = AccessGate(
+        expected_code=os.getenv(code_env_name, "").strip() or None,
+        max_attempts=int(sec_cfg.get("max_failed_access_attempts", 5)),
+    )
 
 if "custom_data_engine" not in st.session_state:
     st.session_state.custom_data_engine = None
+
+if "loaded_csv_sig" not in st.session_state:
+    st.session_state.loaded_csv_sig = None
 
 if "custom_doc_engine" not in st.session_state:
     st.session_state.custom_doc_engine = None
@@ -45,14 +63,15 @@ agent = BrioEpistemicAgent(
     data_engine=data_engine,
     doc_engine=doc_engine,
     tracer=llmops_tracer,
+    config=app_cfg,
     rate_limiter=st.session_state.session_rate_limiter,
 )
 agent._response_cache = st.session_state.agent_response_cache
 
 # Barra lateral de configuración, seguridad y carga dinámica de fuentes
 with st.sidebar:
-    st.markdown("## 🛡️ Almena AI Governance")
-    st.caption(f"Copiloto Neuro-Simbólico de Análisis Comercial — Fuente activa: `{data_engine.csv_path.name}`")
+    st.markdown("## 📊 Almena Foods — Configuración")
+    st.caption(f"Asistente de Análisis Comercial — Fuente activa: `{data_engine.csv_path.name}`")
 
     env_key = os.getenv("GEMINI_API_KEY", "")
     try:
@@ -62,23 +81,33 @@ with st.sidebar:
         pass
 
     api_key_input = st.text_input(
-        "🔑 Gemini API Key (opcional si ya está en Secrets/.env)",
+        "🔑 Gemini API Key (opcional si ya está en .env)",
         value="",
         type="password",
-        help="Protegida con validación de formato, redacción en logs y límite de tasa por sesión.",
+        help="Protegida con validación de formato, redacción en logs y límite de uso por sesión.",
     )
-    effective_api_key = api_key_input.strip() or env_key
+    gate: AccessGate = st.session_state.access_gate
+    if gate.required and not api_key_input.strip() and not gate.granted:
+        access_input = st.text_input("🔐 Código de acceso (para usar la API Key del servidor)", type="password")
+        if access_input:
+            if gate.try_code(access_input):
+                st.success("Código verificado.")
+            elif gate.locked:
+                st.error("Demasiados intentos fallidos. Ingresa tu propia Gemini API Key.")
+            else:
+                st.warning("Código incorrecto.")
+    effective_api_key = api_key_input.strip() or (env_key if (not gate.required or gate.granted) else "")
 
     st.divider()
-    st.markdown("### 🚦 Estado Dinámico del Sistema")
+    st.markdown("### 🚦 Estado de los Datos y Documentos")
     st.success(
         f"📊 CSV Verificado (`{data_engine.csv_path.name}`): {len(data_engine.df_clean):,} registros válidos / "
         f"{len(data_engine.audit_log)} anomalías tratadas ({len(data_engine.quarantine_df)} en cuarentena)"
     )
     inc_ids = sorted({eid for inc in doc_engine.security_incidents for eid in inc.get("evidence_ids", [])})
     st.error(
-        f"🛡️ Firewall Activo: {len(doc_engine.security_incidents)} ataque(s) de Prompt Injection neutralizado(s) "
-        f"({', '.join(inc_ids) if inc_ids else 'ninguno'})"
+        f"🛡️ Filtro de Documentos: {len(doc_engine.security_incidents)} instrucción(es) maliciosa(s) aislada(s) "
+        f"({', '.join(inc_ids) if inc_ids else 'ninguna'})"
     )
     st.info(
         f"📚 Evidencia Indexada (BM25): {len(doc_engine.chunks)} fragmentos en "
@@ -91,16 +120,23 @@ with st.sidebar:
     )
 
     with st.expander("📂 Cargar Otros Datos o Fuentes (Dinámico)"):
-        st.caption("Sube un CSV alternativo o documentos adicionales (.md, .txt, .pdf, .docx) para probar el motor sin código a mano.")
+        st.caption("Sube un CSV alternativo o documentos adicionales (.md, .txt, .pdf, .docx) para probar con nuevos escenarios.")
         uploaded_csv = st.file_uploader("Reemplazar CSV de ventas", type=["csv"], key="up_csv")
         if uploaded_csv is not None:
-            try:
-                df_up = pd.read_csv(io.BytesIO(uploaded_csv.getvalue()), dtype=str)
-                st.session_state.custom_data_engine = SalesDataEngine(df_up, source_name=uploaded_csv.name)
-                st.success(f"CSV `{uploaded_csv.name}` cargado y auditado.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Error al cargar CSV: {redact_secrets(str(exc))}")
+            raw_csv_bytes = uploaded_csv.getvalue()
+            csv_sig = (uploaded_csv.name, len(raw_csv_bytes))
+            if st.session_state.loaded_csv_sig != csv_sig:
+                try:
+                    if len(raw_csv_bytes) > max_upload_bytes:
+                        raise ValueError(f"El archivo supera el límite de {max_upload_bytes // (1024 * 1024)} MB.")
+                    df_up = pd.read_csv(io.BytesIO(raw_csv_bytes), dtype=str)
+                    st.session_state.custom_data_engine = SalesDataEngine(df_up, config=app_cfg, source_name=uploaded_csv.name)
+                    st.session_state.loaded_csv_sig = csv_sig
+                    st.session_state.agent_response_cache.clear()
+                    st.success(f"CSV `{uploaded_csv.name}` cargado y auditado.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Error al cargar CSV: {redact_secrets(str(exc))}")
 
         uploaded_docs = st.file_uploader(
             "Agregar documentos (.md, .txt, .pdf, .docx)",
@@ -109,33 +145,39 @@ with st.sidebar:
             key="up_docs",
         )
         if uploaded_docs and st.button("Indexar documentos subidos", use_container_width=True):
-            new_doc_eng = DocumentSecurityEngine("data")
-            for udoc in uploaded_docs:
-                new_doc_eng.ingest_file(udoc.name, raw_bytes=udoc.getvalue(), rebuild_index=False)
-            new_doc_eng._rebuild_bm25_index()
-            st.session_state.custom_doc_engine = new_doc_eng
-            st.success(f"{len(uploaded_docs)} documento(s) escaneado(s) e indexado(s).")
-            st.rerun()
+            try:
+                new_doc_eng = DocumentSecurityEngine("data", config=app_cfg)
+                for udoc in uploaded_docs:
+                    new_doc_eng.ingest_file(udoc.name, raw_bytes=udoc.getvalue(), rebuild_index=False)
+                new_doc_eng._rebuild_bm25_index()
+                st.session_state.custom_doc_engine = new_doc_eng
+                st.session_state.agent_response_cache.clear()
+                st.success(f"{len(uploaded_docs)} documento(s) escaneado(s) e indexado(s).")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Error al indexar documento: {redact_secrets(str(exc))}")
 
         if (st.session_state.custom_data_engine is not None or st.session_state.custom_doc_engine is not None) and st.button(
             "Restaurar datos originales", use_container_width=True
         ):
             st.session_state.custom_data_engine = None
+            st.session_state.loaded_csv_sig = None
             st.session_state.custom_doc_engine = None
+            st.session_state.agent_response_cache.clear()
             st.rerun()
 
-st.title("🧠 Almena Foods — Analista IA Epistémico")
+st.title("📊 Almena Foods — Asistente de Análisis Comercial (Caso Brío)")
 doc_names = ", ".join(f"`{s['archivo']}`" for s in doc_engine.list_sources_summary())
 st.markdown(
-    f"Integra **cálculo determinista verificable** sobre `{data_engine.csv_path.name}` con **evidencia documental sanitizada** "
-    f"({doc_names}), distinguiendo rigurosamente **hechos comprobados, hipótesis e información insuficiente** con **verificación automática anti-alucinación**."
+    f"Integra **cálculos verificables en Pandas** sobre `{data_engine.csv_path.name}` con **búsqueda documental** "
+    f"({doc_names}), separando **hechos comprobados, hipótesis e información insuficiente** y validando que cada cifra provenga de los datos."
 )
 
 tab_chat, tab_dashboard, tab_audit, tab_llmops = st.tabs([
-    "💬 1. Consultor Epistémico (IA + Function Calling)",
-    "📊 2. Tablero Dinámico vs. Reporte Comercial",
-    "🧹 3. Auditoría Forense (CSV & Firewall Quirúrgico)",
-    "⚙️ 4. Observabilidad LLMOps & Grounding",
+    "💬 1. Consultas en Lenguaje Natural",
+    "📊 2. Tablero de Ventas vs. Reporte Comercial",
+    "🧹 3. Calidad de Datos y Seguridad Documental",
+    "⚙️ 4. Trazabilidad y Arquitectura",
 ])
 
 REFERENCE_QUESTIONS = [

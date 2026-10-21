@@ -25,21 +25,22 @@ from src.text_utils import clean_control_chars, normalize_for_detection
 # Detector de prompt injection
 # ---------------------------------------------------------------------------
 _AI_TARGET = r"(?:asistente|assistant|ia|ai|modelo|model|llm|chatbot|bot|gpt|chatgpt|gemini|claude|copiloto|agente|agent)"
-_OVERRIDE_VERB = r"(?:ignora|ignore|ignorar|olvida|forget|omite|descarta|disregard|override|anula|salta|bypass|skip)"
+_OVERRIDE_VERB = r"(?:ignora|ignore|ignorar|olvida|forget|omite|descarta|disregard|override|anula|salta|bypass|skip|desestima|altera|falsifica|modifica|reemplaza|sustituye)"
 _PRIOR = r"(?:anterior(?:es)?|previas?|previous|prior|above|arriba|todas?|all|cualquier|any|del sistema|system)"
-_INSTR = r"(?:instrucci(?:o|on)(?:es)?|instructions?|reglas?|rules?|indicaciones|ordenes|prompt|resultados?|datos|contexto|context)"
+_INSTR = r"(?:instrucci(?:o|on)(?:es)?|instructions?|reglas?|rules?|indicaciones|ordenes|prompt|resultados?|datos|contexto|context|cifras?)"
 
 INJECTION_PATTERNS: List[Tuple[str, str]] = [
-    ("instruccion_dirigida_a_ia", rf"\b(?:instrucci(?:o|on)(?:es)?|instructions?|mensaje|nota|orden(?:es)?)\s+(?:para|to|for)\s+(?:el|la|los|the)?\s*{_AI_TARGET}\b"),
+    ("instruccion_dirigida_a_ia", rf"\b(?:instrucci(?:o|on)(?:es)?|instructions?|mensaje|nota|orden(?:es)?|directiva)\s+(?:para|to|for)\s+(?:el|la|los|the)?\s*{_AI_TARGET}\b"),
     ("ignorar_instrucciones", rf"\b{_OVERRIDE_VERB}\b.{{0,40}}\b{_PRIOR}\b.{{0,30}}\b{_INSTR}\b"),
-    ("ignorar_fuente", r"\b(?:ignora|ignore|ignorar|disregard|olvida|forget)\b.{0,30}\b(?:resultados?|datos|archivo|csv|tabla|fuente|evidencia|results?|data|file)\b"),
-    ("respuesta_forzada", r"\b(?:responde|contesta|di|afirma|dile|answer|respond|say|reply)\s+(?:siempre|always)\b"),
+    ("ignorar_fuente", rf"\b{_OVERRIDE_VERB}\b.{{0,30}}\b(?:resultados?|datos|archivo|csv|tabla|fuente|evidencia|cifras?|calculos?|results?|data|file|numbers?)\b"),
+    ("respuesta_forzada", r"\b(?:responde|contesta|di|afirma|dile|answer|respond|say|reply|output)\s+(?:siempre|always|unicamente|solamente)\b"),
     ("ocultamiento", r"\b(?:no|never|nunca|don ?t|do not)\s+(?:menciones|reveles|digas|cuentes|informes|mention|reveal|tell|disclose)\b.{0,40}\b(?:instrucci(?:o|on)|instruction|esto|this|usuario|user)\b"),
-    ("cambio_de_rol", r"\b(?:a partir de ahora|from now on|you are now|ahora eres|actua como|act as|pretend to be|finge ser|modo desarrollador|developer mode|jailbreak|dan mode)\b"),
-    ("exfiltracion_prompt", r"\b(?:revela|muestra|imprime|repite|reveal|show|print|repeat|leak)\b.{0,40}\b(?:system prompt|prompt del sistema|instrucciones del sistema|system instructions|tus instrucciones|your instructions|api key|api_key|clave de api|contrasena|password)\b"),
-    ("nuevas_instrucciones", r"\b(?:nuevas instrucciones|new instructions|updated instructions|instrucciones actualizadas)\b"),
-    ("etiquetas_de_control", r"</?\s*(?:system|assistant|user|developer|tool|verified_[a-z_]+|untrusted_[a-z_]+|analyst_question[a-z0-9_]*|instructions?)\s*>"),
+    ("cambio_de_rol", r"\b(?:a partir de ahora|from now on|you are now|ahora eres|actua como|act as|pretend to be|finge ser|simulate being|modo desarrollador|developer mode|jailbreak|dan mode|system override)\b"),
+    ("exfiltracion_prompt", r"\b(?:revela|muestra|imprime|repite|reveal|show|print|repeat|leak|dump)\b.{0,40}\b(?:system prompt|prompt del sistema|instrucciones del sistema|system instructions|tus instrucciones|your instructions|api key|api_key|clave de api|contrasena|password)\b"),
+    ("nuevas_instrucciones", r"\b(?:nuevas instrucciones|new instructions|updated instructions|instrucciones actualizadas|override instructions)\b"),
+    ("etiquetas_de_control", r"</?\s*(?:system|assistant|user|developer|tool|verified_[a-z_]+|untrusted_[a-z_]+|analyst_question[a-z0-9_]*|conversation_memory[a-z0-9_]*|security_firewall[a-z0-9_]*|instructions?)\s*>"),
     ("rol_markup", r"(?:^|\s)(?:system|assistant|developer)\s*:\s"),
+    ("inyeccion_esquema_json", r"\{\s*\"?(?:resumen_ejecutivo|hechos_comprobados|fuentes_citadas)\"?\s*:"),
 ]
 _COMPILED = [(name, re.compile(rx, re.IGNORECASE | re.DOTALL)) for name, rx in INJECTION_PATTERNS]
 
@@ -100,6 +101,13 @@ def neutralize_markup(text: str) -> str:
     return (text or "").replace("<", "‹").replace(">", "›")
 
 
+def sanitize_filename(name: str, default: str = "archivo_subido") -> str:
+    """Limpia nombres de archivo subidos (sin rutas, caracteres de control ni etiquetas)."""
+    base = Path(clean_control_chars(str(name or ""))).name
+    safe = re.sub(r"[^A-Za-z0-9_.\- áéíóúÁÉÍÓÚñÑ]", "_", base).strip(" ._")
+    return (safe[:80] if safe else default)
+
+
 # ---------------------------------------------------------------------------
 # Secretos
 # ---------------------------------------------------------------------------
@@ -158,6 +166,13 @@ class SessionRateLimiter:
         self._events.append(now)
         self.total += 1
 
+    def rollback_last(self) -> None:
+        """Devuelve el cupo si la llamada al proveedor falló por causa externa."""
+        if self._events:
+            self._events.pop()
+        if self.total > 0:
+            self.total -= 1
+
 
 class DailyUsageBudget:
     """Presupuesto diario (UTC) compartido por todo el proceso para la API key del servidor, persistido en disco."""
@@ -198,6 +213,12 @@ class DailyUsageBudget:
             if int(data["tokens"]) >= self.max_tokens:
                 raise RateLimitExceeded("Se agotó el presupuesto diario de tokens de la API key del servidor.")
             data["requests"] = int(data["requests"]) + 1
+            self._write(data)
+
+    def refund_request(self) -> None:
+        with self._lock:
+            data = self._read()
+            data["requests"] = max(0, int(data["requests"]) - 1)
             self._write(data)
 
     def add_tokens(self, tokens: int) -> None:

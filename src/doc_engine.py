@@ -20,7 +20,7 @@ import pypdf
 from defusedxml import ElementTree as DefusedET
 
 from src.config import load_config, resolve_path
-from src.security import neutralize_markup, scan_for_injection
+from src.security import neutralize_markup, sanitize_filename, scan_for_injection
 from src.text_utils import fold, tokenize
 
 EVIDENCE_ID_REGEX = re.compile(
@@ -42,6 +42,11 @@ class DocumentSecurityEngine:
             ext.lower()
             for ext in self.config.get("data", {}).get("document_extensions", [".md", ".txt", ".pdf", ".docx"])
         }
+        doc_cfg = self.config.get("documents", {})
+        self.max_chunk_chars = int(doc_cfg.get("max_chunk_chars", 1800))
+        self.max_file_bytes = int(doc_cfg.get("max_file_bytes", 10 * 1024 * 1024))
+        self.max_xml_bytes = int(doc_cfg.get("max_xml_bytes", 15 * 1024 * 1024))
+        self.max_pdf_pages = int(doc_cfg.get("max_pdf_pages", 150))
         self.chunks: List[Dict[str, Any]] = []
         self.security_incidents: List[Dict[str, Any]] = []
         self._chunk_tokens: List[List[str]] = []
@@ -54,9 +59,19 @@ class DocumentSecurityEngine:
         return res.is_injection, res.matched
 
     def _parse_docx_bytes(self, raw_bytes: bytes) -> List[Tuple[str, str]]:
-        """Extrae párrafos y filas de tablas de un archivo .docx usando defusedxml (protección XXE/bombas XML)."""
-        with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as z:
-            xml_content = z.read("word/document.xml")
+        """Extrae párrafos y filas de tablas de un archivo .docx usando defusedxml (protección XXE y bombas ZIP/XML)."""
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as z:
+                if "word/document.xml" not in z.namelist():
+                    raise ValueError("El archivo .docx no contiene 'word/document.xml'.")
+                info = z.getinfo("word/document.xml")
+                if info.file_size > self.max_xml_bytes:
+                    raise ValueError(
+                        f"El XML descomprimido del .docx ({info.file_size:,} bytes) supera el límite seguro ({self.max_xml_bytes:,} bytes)."
+                    )
+                xml_content = z.read("word/document.xml")
+        except zipfile.BadZipFile as err:
+            raise ValueError("El archivo .docx no es un contenedor ZIP válido.") from err
         tree = DefusedET.fromstring(xml_content)
         ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
         body = tree.find("w:body", ns)
@@ -89,6 +104,8 @@ class DocumentSecurityEngine:
 
     def _parse_pdf_bytes(self, raw_bytes: bytes) -> List[Tuple[str, str]]:
         reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
+        if len(reader.pages) > self.max_pdf_pages:
+            raise ValueError(f"El PDF tiene {len(reader.pages)} páginas (máximo permitido: {self.max_pdf_pages}).")
         pages: List[Tuple[str, str]] = []
         for idx, page in enumerate(reader.pages):
             raw_text = page.extract_text() or ""
@@ -122,9 +139,15 @@ class DocumentSecurityEngine:
     ) -> None:
         """Ingiere dinámicamente cualquier archivo .md, .txt, .pdf o .docx (de disco o subido por el usuario)."""
         path_obj = Path(filepath)
-        source_name = path_obj.name
+        source_name = sanitize_filename(path_obj.name)
         ext = path_obj.suffix.lower()
+        if ext not in self.allowed_exts:
+            raise ValueError(f"Extensión '{ext}' no permitida. Extensiones válidas: {sorted(self.allowed_exts)}")
         data = raw_bytes if raw_bytes is not None else path_obj.read_bytes()
+        if len(data) > self.max_file_bytes:
+            raise ValueError(
+                f"El archivo '{source_name}' ({len(data):,} bytes) supera el tamaño máximo permitido ({self.max_file_bytes:,} bytes)."
+            )
 
         if ext in (".md", ".txt"):
             text = data.decode("utf-8", errors="replace")
@@ -215,17 +238,42 @@ class DocumentSecurityEngine:
                 self._append_safe_chunk(source_file, location, safe_text)
 
     def _append_safe_chunk(self, source_file: str, location: str, text: str) -> None:
-        evidence_ids = sorted(set(EVIDENCE_ID_REGEX.findall(text)))
-        store_ids = sorted(set(STORE_ID_REGEX.findall(text)))
         sanitized_text = neutralize_markup(text)
-        self.chunks.append({
-            "chunk_id": f"{source_file}::{location}::{len(self.chunks) + 1}",
-            "source_file": source_file,
-            "location": location,
-            "evidence_ids": evidence_ids,
-            "store_ids": store_ids,
-            "text": sanitized_text,
-        })
+        # Si el bloque supera max_chunk_chars, dividir por saltos de línea o ventanas acotadas
+        segments: List[str] = []
+        if len(sanitized_text) <= self.max_chunk_chars:
+            segments = [sanitized_text]
+        else:
+            buf = ""
+            for para in sanitized_text.split("\n"):
+                if len(para) > self.max_chunk_chars:
+                    if buf:
+                        segments.append(buf.strip())
+                        buf = ""
+                    for i in range(0, len(para), self.max_chunk_chars):
+                        segments.append(para[i : i + self.max_chunk_chars].strip())
+                elif len(buf) + len(para) + 1 <= self.max_chunk_chars:
+                    buf = f"{buf}\n{para}" if buf else para
+                else:
+                    if buf:
+                        segments.append(buf.strip())
+                    buf = para
+            if buf.strip():
+                segments.append(buf.strip())
+
+        for seg in segments:
+            if not seg:
+                continue
+            evidence_ids = sorted(set(EVIDENCE_ID_REGEX.findall(seg)))
+            store_ids = sorted(set(STORE_ID_REGEX.findall(seg)))
+            self.chunks.append({
+                "chunk_id": f"{source_file}::{location}::{len(self.chunks) + 1}",
+                "source_file": source_file,
+                "location": location,
+                "evidence_ids": evidence_ids,
+                "store_ids": store_ids,
+                "text": seg,
+            })
 
     def get_sanitized_incidents_for_prompt(self) -> List[Dict[str, Any]]:
         """

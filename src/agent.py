@@ -135,6 +135,11 @@ class BrioEpistemicAgent:
         llm_cfg = self.config.get("llm", {})
         sec_cfg = self.config.get("security", {})
         self.model_name = os.getenv("GEMINI_MODEL", llm_cfg.get("model", "gemini-3.8-flash"))
+        raw_fallbacks = llm_cfg.get("fallback_models", ["gemini-2.5-flash"])
+        self.fallback_models: List[str] = [
+            str(m).strip() for m in (raw_fallbacks or []) if str(m).strip() and str(m).strip() != self.model_name
+        ]
+        self._last_model_used: str = self.model_name
         self.temperature = float(llm_cfg.get("temperature", 0.1))
         self.max_output_tokens = int(llm_cfg.get("max_output_tokens", 4096))
         self.max_tool_iterations = int(llm_cfg.get("max_tool_iterations", 4))
@@ -428,9 +433,22 @@ class BrioEpistemicAgent:
         return funcs, {f.__name__: f for f in funcs}
 
     @staticmethod
-    def _is_transient_error(err: Exception) -> bool:
-        """Solo se reintentan errores transitorios (429, 5xx, timeouts). 400/401/403/404 fallan de inmediato
-        para no desperdiciar cuota ni tiempo con una API key inválida o una petición mal formada."""
+    def _is_auth_or_bad_request(err: Exception) -> bool:
+        """Errores de credenciales o petición inválida (400/401/403) que no deben reintentarse ni pasar a fallback."""
+        code = getattr(err, "code", None) or getattr(err, "status_code", None)
+        try:
+            code = int(code) if code is not None else None
+        except (TypeError, ValueError):
+            code = None
+        if code in (400, 401, 403):
+            return True
+        msg = str(err).lower()
+        return any(t in msg for t in ("api key not valid", "permission_denied", "invalid_argument", "unauthenticated"))
+
+    def _is_transient_error(self, err: Exception) -> bool:
+        """Solo se reintentan sobre el mismo modelo errores transitorios (429, 5xx, timeouts)."""
+        if self._is_auth_or_bad_request(err):
+            return False
         code = getattr(err, "code", None) or getattr(err, "status_code", None)
         try:
             code = int(code) if code is not None else None
@@ -439,25 +457,36 @@ class BrioEpistemicAgent:
         if code is not None:
             return code == 429 or code >= 500
         msg = str(err).lower()
-        if any(t in msg for t in ("api key not valid", "permission_denied", "invalid_argument", "unauthenticated", "not_found")):
+        if "not_found" in msg or "404" in msg:
             return False
         return True
 
     def _call_gemini_with_retries(self, client: Any, contents: Any, config: Any) -> Any:
         last_err: Optional[Exception] = None
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                return client.models.generate_content(
-                    model=self.model_name,
-                    contents=contents,
-                    config=config,
-                )
-            except Exception as err:
-                last_err = err
-                if attempt >= self.max_retries or not self._is_transient_error(err):
-                    break
-                time.sleep(min(4.0, 0.6 * (2 ** (attempt - 1))))
-        raise RuntimeError(f"Error al invocar el modelo tras {attempt} intento(s): {redact_secrets(str(last_err))}")
+        total_attempts = 0
+        models_to_try = [self.model_name, *self.fallback_models]
+        for idx_m, candidate_model in enumerate(models_to_try):
+            retries_for_model = self.max_retries if idx_m == 0 else 1
+            for attempt in range(1, retries_for_model + 1):
+                total_attempts += 1
+                try:
+                    resp = client.models.generate_content(
+                        model=candidate_model,
+                        contents=contents,
+                        config=config,
+                    )
+                    self._last_model_used = candidate_model
+                    return resp
+                except Exception as err:
+                    last_err = err
+                    if self._is_auth_or_bad_request(err):
+                        raise RuntimeError(
+                            f"Error al invocar el modelo tras {total_attempts} intento(s): {redact_secrets(str(last_err))}"
+                        ) from err
+                    if attempt >= retries_for_model or not self._is_transient_error(err):
+                        break
+                    time.sleep(min(4.0, 0.6 * (2 ** (attempt - 1))))
+        raise RuntimeError(f"Error al invocar el modelo tras {total_attempts} intento(s): {redact_secrets(str(last_err))}")
 
     @staticmethod
     def _parse_structured_response(response: Any) -> "EpistemicAnalysisResponse":
@@ -487,11 +516,18 @@ class BrioEpistemicAgent:
         clean_question = sanitize_user_question(question, max_chars=self.max_question_chars)
 
         # 2. Caché en memoria para respuestas ya verificadas (0 tokens y <1 ms en consultas repetidas)
+        sales_fingerprint = (
+            round(float(self.data_engine.df_clean["venta_neta_cop_num"].sum()), 2)
+            if "venta_neta_cop_num" in self.data_engine.df_clean.columns and not self.data_engine.df_clean.empty
+            else 0.0
+        )
+        doc_fingerprint = tuple(c["chunk_id"] for c in self.doc_engine.chunks)
         cache_key = (
             fold(clean_question),
             self.data_engine.csv_path.name,
             len(self.data_engine.df_clean),
-            len(self.doc_engine.chunks),
+            sales_fingerprint,
+            doc_fingerprint,
         )
         if use_cache and self.client_override is None and cache_key in self._response_cache:
             cached = self._response_cache[cache_key]
@@ -601,18 +637,25 @@ class BrioEpistemicAgent:
         # se reintenta con el doble de presupuesto de salida en lugar de mostrar un error al analista.
         max_tokens = self.max_output_tokens
         repair_rounds_used = 0
-        while True:
-            response = self._call_gemini_with_retries(client, user_prompt, make_config(max_tokens))
-            try:
-                validated_model = self._parse_structured_response(response)
-                break
-            except ValueError as parse_err:
-                if repair_rounds_used >= self.max_repair_rounds:
-                    raise RuntimeError(
-                        f"{parse_err} Intenta reformular la consulta de forma más acotada."
-                    ) from parse_err
-                repair_rounds_used += 1
-                max_tokens *= 2
+        try:
+            while True:
+                response = self._call_gemini_with_retries(client, user_prompt, make_config(max_tokens))
+                try:
+                    validated_model = self._parse_structured_response(response)
+                    break
+                except ValueError as parse_err:
+                    if repair_rounds_used >= self.max_repair_rounds:
+                        raise RuntimeError(
+                            f"{parse_err} Intenta reformular la consulta de forma más acotada."
+                        ) from parse_err
+                    repair_rounds_used += 1
+                    max_tokens *= 2
+        except Exception:
+            if enforce_rate_limit:
+                self.rate_limiter.rollback_last()
+                if not using_override:
+                    self.daily_budget.refund_request()
+            raise
 
         parsed_dict = validated_model.model_dump()
 
@@ -660,7 +703,7 @@ class BrioEpistemicAgent:
 
         trace = self.tracer.record_trace(
             question=clean_question,
-            model_name=self.model_name,
+            model_name=self._last_model_used,
             latency_ms=latency_ms,
             deterministic_calls=det_calls,
             retrieved_chunks=retrieved_chunks,

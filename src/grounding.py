@@ -176,15 +176,13 @@ def verify_epistemic_grounding(
             else:
                 unverified_citations.append(p)
 
-    # 2. Validar cifras en `hechos_comprobados`
+    # 2. Validar cifras en `hechos_comprobados` y `resumen_ejecutivo`
     verified_numbers: List[float] = []
     unverified_numbers: List[Dict[str, Any]] = []
     clean_facts: List[str] = []
 
-    for fact in structured_response.get("hechos_comprobados", []) or []:
-        fact_str = str(fact)
-        # Eliminar IDs de registro/evidencia/tiendas y fechas AAAA-MM antes de extraer cifras
-        scrubbed = EVIDENCE_ID_REGEX.sub(" ", fact_str)
+    def _scrub_identifiers_and_constants(text: str) -> str:
+        scrubbed = EVIDENCE_ID_REGEX.sub(" ", text)
         scrubbed = STORE_ID_REGEX.sub(" ", scrubbed)
         scrubbed = _RECORD_ID_RE.sub(" ", scrubbed)
         scrubbed = re.sub(r"\b20\d{2}-\d{2}\b", " ", scrubbed)
@@ -192,8 +190,12 @@ def verify_epistemic_grounding(
         # Eliminar constantes de fórmulas explícitas (p. ej. "(T2 / T1 - 1) * 100"): no son cifras de negocio
         scrubbed = re.sub(r"[*×xX·]\s*100\b(?!\s*[.,]\d)", " ", scrubbed)
         scrubbed = re.sub(r"[-−]\s*1\s*\)", ")", scrubbed)
+        return scrubbed
 
-        fact_has_unverified = False
+    def _audit_statement(stmt: str) -> bool:
+        """Retorna True si todas las cifras de `stmt` están respaldadas."""
+        scrubbed = _scrub_identifiers_and_constants(stmt)
+        has_unverified = False
         for m in _NUMBER_TOKEN_RE.finditer(scrubbed):
             raw_num, pct_sign = m.group(1), m.group(2)
             val = parse_spanish_or_en_number(raw_num)
@@ -203,16 +205,33 @@ def verify_epistemic_grounding(
             if _is_number_authorized(val, is_pct=is_pct, authorized=authorized_numbers):
                 verified_numbers.append(val)
             else:
-                fact_has_unverified = True
-                unverified_numbers.append({"cifra": f"{raw_num}{pct_sign or ''}", "afirmacion": fact_str})
+                has_unverified = True
+                unverified_numbers.append({"cifra": f"{raw_num}{pct_sign or ''}", "afirmacion": stmt})
+        return not has_unverified
 
-        if not fact_has_unverified:
+    for fact in structured_response.get("hechos_comprobados", []) or []:
+        fact_str = str(fact)
+        if _audit_statement(fact_str):
             clean_facts.append(fact_str)
         elif not strict_sanitize:
             clean_facts.append(f"[CIFRA NO VERIFICADA EN MOTOR DETERMINISTA] {fact_str}")
 
+    raw_summary = str(structured_response.get("resumen_ejecutivo", "") or "").strip()
+    clean_summary_sentences: List[str] = []
+    if raw_summary:
+        # Separar en oraciones sin romper decimales como "-30.27%" o "$1.433.250"
+        sentences = [s.strip() for s in re.split(r"(?<!\d)[.!?]+(?=\s+[A-ZÁÉÍÓÚÑ¿¡]|\s*$)", raw_summary) if s.strip()]
+        for sent in (sentences or [raw_summary]):
+            sent_with_dot = sent if sent.endswith((".", "!", "?")) else f"{sent}."
+            if _audit_statement(sent_with_dot):
+                clean_summary_sentences.append(sent_with_dot)
+    clean_summary = " ".join(clean_summary_sentences).strip()
+    if not clean_summary:
+        clean_summary = clean_facts[0] if clean_facts else raw_summary
+
     updated = dict(structured_response)
     if strict_sanitize:
+        updated["resumen_ejecutivo"] = clean_summary
         updated["fuentes_citadas"] = verified_citations
         updated["hechos_comprobados"] = clean_facts
         if unverified_numbers or unverified_citations:

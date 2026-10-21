@@ -18,7 +18,8 @@ import numpy as np
 import pandas as pd
 
 from src.config import load_config, resolve_path
-from src.text_utils import fold
+from src.security import neutralize_markup, sanitize_filename, scan_for_injection
+from src.text_utils import clean_control_chars, fold
 
 PERIOD_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
 DERIVED_PRICE = "precio_unitario_promedio"
@@ -64,9 +65,10 @@ class SalesDataEngine:
         self.units_col: Optional[str] = sch.get("units_column")
         self.currency: str = sch.get("currency", "COP")
         self.max_listed_values: int = int(sch.get("max_listed_values", 30))
+        self.max_csv_rows: int = int(sch.get("max_csv_rows", 200_000))
 
         if isinstance(csv_path, pd.DataFrame):
-            self.csv_path = Path(source_name or "uploaded_dataset.csv")
+            self.csv_path = Path(sanitize_filename(source_name or "uploaded_dataset.csv"))
             self._initial_df: Optional[pd.DataFrame] = csv_path.copy()
         else:
             self.csv_path = resolve_path(csv_path)
@@ -144,15 +146,15 @@ class SalesDataEngine:
                 return
 
         self.audit_log.append({
-            "registro_id": reg_id,
+            "registro_id": neutralize_markup(reg_id)[:60],
             "fila_csv": fila_csv,
             "linea_archivo": linea_archivo,
-            "columna": columna,
-            "marca": marca_val,
-            "region": region_val,
-            "mes": mes_val,
+            "columna": neutralize_markup(columna)[:60],
+            "marca": neutralize_markup(marca_val)[:60],
+            "region": neutralize_markup(region_val)[:60],
+            "mes": neutralize_markup(mes_val)[:30],
             "tipo_anomalia": tipo_anomalia,
-            "valor_original": valor_original,
+            "valor_original": neutralize_markup(valor_original)[:140],
             "accion_aplicada": accion_aplicada,
             "estado": estado,
         })
@@ -162,6 +164,9 @@ class SalesDataEngine:
             raw = self._initial_df.astype(str).replace({"nan": np.nan, "None": np.nan})
         else:
             raw = pd.read_csv(self.csv_path, dtype=str)
+
+        if len(raw) > self.max_csv_rows:
+            raise ValueError(f"El CSV contiene {len(raw):,} filas (máximo permitido: {self.max_csv_rows:,}).")
 
         self._detect_schema(raw)
         raw["_fila_csv"] = np.arange(len(raw), dtype=int)
@@ -177,14 +182,50 @@ class SalesDataEngine:
         self.audit_log = []
         self.consistency_maps = {}
         self._cache = {}
+        quarantined_chunks: List[pd.DataFrame] = []
+
+        def _quarantine(mask: pd.Series, motivo: str) -> None:
+            nonlocal df
+            if mask.any():
+                q = df[mask].copy()
+                q["_motivo_cuarentena"] = motivo
+                quarantined_chunks.append(q)
+                df = df[~mask].copy()
+
+        # 0. Escaneo de celdas del CSV contra inyección de instrucciones o etiquetas de control
+        text_cols = [self.id_col, self.period_col, *self.dimensions]
+        scan_cols = [*text_cols, "venta_raw"] + (["unidades_raw"] if "unidades_raw" in df.columns else [])
+        inj_mask = pd.Series(False, index=df.index)
+        for col in scan_cols:
+            if col not in df.columns:
+                continue
+            bad_vals = {
+                v
+                for v in df[col].dropna().unique()
+                if len(str(v)) >= 12 and scan_for_injection(str(v)).is_injection
+            }
+            if bad_vals:
+                col_mask = df[col].isin(bad_vals)
+                for idx in df[col_mask & ~inj_mask].index:
+                    row = df.loc[idx].copy()
+                    row[col] = "[REDACTADO]"
+                    self._upsert_audit_entry(
+                        row=row,
+                        columna=col,
+                        tipo_anomalia=f"Intento de Inyección en Celda CSV ('{col}')",
+                        valor_original="[CONTENIDO MALICIOSO REDACTADO]",
+                        accion_aplicada="Fila puesta en cuarentena y omitida del contexto del modelo",
+                        estado=ESTADO_EXCLUIDO,
+                    )
+                inj_mask = inj_mask | col_mask
+        _quarantine(inj_mask, "inyeccion_csv")
 
         # 1. Normalización dinámica de espacios y capitalización hacia la forma canónica mayoritaria
-        text_cols = [self.id_col, self.period_col, *self.dimensions]
         for col in text_cols:
             if col not in df.columns:
                 continue
             raw_series = df[col].fillna("").astype(str)
-            stripped = raw_series.str.strip()
+            stripped = raw_series.map(lambda s: neutralize_markup(clean_control_chars(s)).strip())
             if col in self.dimensions and col != "punto_venta_id":
                 # Inferir forma canónica por mayoría (insensible a mayúsculas/acentos)
                 keys = stripped.map(fold)
@@ -254,16 +295,6 @@ class SalesDataEngine:
                     estado=ESTADO_CORREGIDO,
                 )
                 df.loc[idx, col] = expected.loc[idx]
-
-        quarantined_chunks: List[pd.DataFrame] = []
-
-        def _quarantine(mask: pd.Series, motivo: str) -> None:
-            nonlocal df
-            if mask.any():
-                q = df[mask].copy()
-                q["_motivo_cuarentena"] = motivo
-                quarantined_chunks.append(q)
-                df = df[~mask].copy()
 
         # 3. Deduplicación por llave primaria registro_id (distinguiendo duplicado exacto vs conflicto de contenido)
         compare_cols = [self.period_col, *self.dimensions, "venta_raw"] + (["unidades_raw"] if "unidades_raw" in df.columns else [])
