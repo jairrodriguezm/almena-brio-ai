@@ -1,0 +1,22 @@
+# Variables de entorno y credenciales
+.env
+.env.local
+
+# Entornos virtuales
+.venv/
+env/
+venv/
+
+# Caches de Python y Pytest
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Trazas locales de LLMOps
+llmops_traces.jsonl
+
+# Configuración local de IDEs y SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
