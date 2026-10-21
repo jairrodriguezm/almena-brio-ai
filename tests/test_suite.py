@@ -2,8 +2,14 @@ from pathlib import Path
 from typing import Any, Dict, List
 import json
 import os
+import sys
 import pandas as pd
 import pytest
+
+# Asegurar que la raíz del proyecto esté en sys.path tanto en local como en CI/Linux
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from src.agent import BrioEpistemicAgent, EpistemicAnalysisResponse
 from src.data_engine import DataQueryError, SalesDataEngine
