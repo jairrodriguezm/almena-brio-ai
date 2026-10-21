@@ -1,0 +1,76 @@
+# =============================================================================
+# Configuración del Analista Epistémico.
+# Nada del análisis está codificado a mano en el código: las columnas, reglas de
+# consistencia, documentos y límites de seguridad se definen aquí. Para analizar
+# otra base o agregar fuentes basta con ajustar este archivo y/o la carpeta data/.
+# =============================================================================
+
+[data]
+dir = "data"
+sales_file = "02_Ventas_2026.csv"
+# Toda la carpeta `dir` se escanea automáticamente con estas extensiones.
+document_extensions = [".md", ".txt", ".pdf", ".docx"]
+
+[schema]
+id_column = "registro_id"
+period_column = "mes"          # formato AAAA-MM
+sales_column = "venta_neta_cop"
+units_column = "unidades"
+currency = "COP"
+# Columnas con más valores distintos que este umbral se consideran identificadores
+# (no se listan completas al describir el dataset).
+max_listed_values = 30
+
+# Reglas de consistencia: el valor de `column` debe ser coherente con el código
+# extraído de `source_column` mediante `pattern` (primer grupo de captura).
+# El mapeo código -> valor NO se escribe a mano: se infiere de la mayoría de los datos.
+[[schema.consistency_rules]]
+column = "canal"
+source_column = "punto_venta_id"
+pattern = "^[A-Z]{2}-([A-Z])-"
+
+[[schema.consistency_rules]]
+column = "region"
+source_column = "punto_venta_id"
+pattern = "^([A-Z]{2})-"
+
+[analysis]
+# Solo valores por defecto de la interfaz (el usuario puede cambiarlos).
+default_focus_column = "marca"
+default_focus_value = "Brio"
+default_dimension = "region"
+# Dimensiones que definen el "alcance" de un registro en el análisis de sensibilidad.
+sensitivity_scope = ["marca"]
+consistency_min_share = 0.95
+
+[documents]
+# Códigos de evidencia citables (INV-01, OC-SUR-01, CAM-101, REP-02, INV-LIM-01...).
+evidence_id_pattern = '\b[A-Z]{2,5}(?:-[A-Z]{2,5})*-\d{2,4}\b'
+max_chunk_chars = 1800
+default_top_k = 8
+
+[llm]
+model = "gemini-3.8-flash"     # GEMINI_MODEL en el entorno tiene prioridad
+temperature = 0.1
+max_output_tokens = 4096
+max_tool_iterations = 8
+request_timeout_s = 90
+max_retries = 3
+max_repair_rounds = 1
+max_tool_rows = 60
+
+[security]
+max_question_chars = 800
+requests_per_minute_per_session = 4
+max_requests_per_session = 25
+# Presupuesto diario (UTC) cuando se usa la API key del servidor.
+daily_request_limit_server_key = 150
+daily_token_limit_server_key = 2_500_000
+# Si esta variable/secret existe, se exige un código de acceso para usar la key del servidor.
+access_code_env = "APP_ACCESS_CODE"
+max_failed_access_attempts = 5
+usage_file = ".runtime/usage.json"
+
+[llmops]
+log_path = "llmops_traces.jsonl"
+max_log_bytes = 5_000_000

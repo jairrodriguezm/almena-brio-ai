@@ -12,8 +12,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# Trazas locales de LLMOps
+# Trazas locales de LLMOps y estado de cuotas
 llmops_traces.jsonl
+llmops_traces.jsonl.bak
+.runtime/
 
 # Configuración local de IDEs y SO
 .vscode/
