@@ -1,8 +1,35 @@
 import io
 import os
+import re
+from typing import Any
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+
+
+def escape_latex_dollars(text: str) -> str:
+    """
+    Escapa cualquier símbolo '$' que no esté ya escapado para evitar
+    que KaTeX/Streamlit lo interprete como fórmula matemática.
+    """
+    if not isinstance(text, str):
+        return text
+    # Reemplaza '$' por '\$' únicamente si no viene precedido de '\'
+    return re.sub(r'(?<!\\)\$', r'\$', text)
+
+
+def clean_epistemic_payload(data: Any) -> Any:
+    """
+    Recorre recursivamente diccionarios, listas o strings para desinfectar
+    colisiones con sintaxis LaTeX.
+    """
+    if isinstance(data, str):
+        return escape_latex_dollars(data)
+    elif isinstance(data, list):
+        return [clean_epistemic_payload(item) for item in data]
+    elif isinstance(data, dict):
+        return {k: clean_epistemic_payload(v) for k, v in data.items()}
+    return data
 
 from src.config import load_config
 from src.data_engine import SalesDataEngine
@@ -211,6 +238,8 @@ with tab_chat:
                     api_key_override=effective_api_key,
                     chat_history=st.session_state.chat_history,
                 )
+                if "response" in result:
+                    result["response"] = clean_epistemic_payload(result["response"])
                 st.session_state.chat_history.insert(0, {"query": active_query, "result": result})
             except UnsafeInputError as sec_err:
                 st.error(f"🛡️ Consulta bloqueada por el Firewall de Entrada: {sec_err}")
@@ -222,8 +251,8 @@ with tab_chat:
                 st.error(f"Error al procesar la consulta: {redact_secrets(str(err))}")
 
     for item in st.session_state.chat_history:
-        q = item["query"]
-        res = item["result"]["response"]
+        q = escape_latex_dollars(item["query"])
+        res = clean_epistemic_payload(item["result"]["response"])
         tr = item["result"]["trace"]
         gr = item["result"].get("grounding", tr.get("grounding_report", {}))
 

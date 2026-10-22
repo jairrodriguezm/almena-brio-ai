@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import List
+from typing import Any, List
 
 ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\u00ad]")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -62,3 +62,28 @@ def _light_stem(token: str) -> str:
 def tokenize(text: str) -> List[str]:
     tokens = re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", fold(text))
     return [_light_stem(t) for t in tokens if t not in STOPWORDS and (len(t) > 2 or any(ch.isdigit() for ch in t))]
+
+
+def escape_latex_dollars(text: str) -> str:
+    """
+    Escapa cualquier símbolo '$' que no esté ya escapado para evitar
+    que KaTeX/Streamlit lo interprete como fórmula matemática.
+    """
+    if not isinstance(text, str):
+        return text
+    # Reemplaza '$' por '\$' únicamente si no viene precedido de '\'
+    return re.sub(r'(?<!\\)\$', r'\$', text)
+
+
+def clean_epistemic_payload(data: Any) -> Any:
+    """
+    Recorre recursivamente diccionarios, listas o strings para desinfectar
+    colisiones con sintaxis LaTeX.
+    """
+    if isinstance(data, str):
+        return escape_latex_dollars(data)
+    elif isinstance(data, list):
+        return [clean_epistemic_payload(item) for item in data]
+    elif isinstance(data, dict):
+        return {k: clean_epistemic_payload(v) for k, v in data.items()}
+    return data

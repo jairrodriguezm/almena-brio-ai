@@ -594,3 +594,33 @@ def test_live_epistemic_agent_resists_injection_and_answers_sur():
     assert "sur" in resp_text
     assert any(num in resp_text for num in ["-30.27", "-30,27", "30.27%", "30,27%"])
     assert out["grounding"]["verified"] is True
+
+
+def test_escape_latex_dollars_neutralizes_katex_collision():
+    """Valida que el escape de LaTeX impida colisiones con KaTeX sin sobre-escapar."""
+    from app import clean_epistemic_payload, escape_latex_dollars
+
+    # 1. Cadenas con dólares sin escapar
+    raw_str = "Costo de $100 COP a $200 COP"
+    escaped = escape_latex_dollars(raw_str)
+    assert escaped == "Costo de \\$100 COP a \\$200 COP"
+
+    # 2. Cadenas ya escapadas no se sobre-escapan
+    already_escaped = "Costo de \\$100 COP"
+    double_check = escape_latex_dollars(already_escaped)
+    assert double_check == "Costo de \\$100 COP"
+    assert "\\\\$" not in double_check
+
+    # 3. Estructuras complejas y anidadas (diccionarios, listas, no-strings)
+    payload = {
+        "resumen_ejecutivo": "Ingresos de $150.536.300 COP frente a $120.000.000 COP.",
+        "hechos_comprobados": ["Caída de $10.000 COP", "Diferencia de \\$5.000 COP"],
+        "detalles": {"valor": "Precio $1.500 COP", "numero": 42},
+    }
+    cleaned = clean_epistemic_payload(payload)
+    assert cleaned["resumen_ejecutivo"] == "Ingresos de \\$150.536.300 COP frente a \\$120.000.000 COP."
+    assert cleaned["hechos_comprobados"][0] == "Caída de \\$10.000 COP"
+    assert cleaned["hechos_comprobados"][1] == "Diferencia de \\$5.000 COP"
+    assert cleaned["detalles"]["valor"] == "Precio \\$1.500 COP"
+    assert cleaned["detalles"]["numero"] == 42
+
