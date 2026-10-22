@@ -1,6 +1,6 @@
 # 📊 Almena Foods — Asistente de Análisis Comercial con IA (Caso Brío 2026)
 
-![Tests](https://img.shields.io/badge/Pytest-23%2F23%20Passing-22c55e?style=flat-square)
+![Tests](https://img.shields.io/badge/Pytest-24%2F24%20Passing-22c55e?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-38bdf8?style=flat-square)
 ![Grounding](https://img.shields.io/badge/Verificaci%C3%B3n-Cifras%20y%20Citas%20Auditadas-a855f7?style=flat-square)
 ![Security](https://img.shields.io/badge/Seguridad-Filtro%20Anti--Prompt%20Injection-ef4444?style=flat-square)
@@ -53,7 +53,7 @@ El equipo comercial de **Almena Foods** observó una caída en las ventas de su 
 | **B. Análisis comercial verificable** (sin delegar cálculos al LLM) | Todo cálculo (T1, T2, Δ, Δ%, participación, rankings) lo hace Pandas. El LLM solo redacta, y un validador post-LLM elimina cualquier cifra que no salga del motor. | [`data_engine.py`](file:///c:/jair/almena-brio-ai/src/data_engine.py), [`grounding.py`](file:///c:/jair/almena-brio-ai/src/grounding.py) |
 | **C. IA generativa real** (gratuita) | Google Gemini (capa gratuita de AI Studio) con salida estructurada (Pydantic) y *Function Calling* para consultas ad-hoc. | [`agent.py`](file:///c:/jair/almena-brio-ai/src/agent.py) |
 | **D. Evidencia y límites** (fuentes, contradicciones, causalidad no demostrada) | Esquema obligatorio: hechos comprobados / hipótesis / contradicciones / límites / fuentes. Citas a IDs reales (`INV-01`, `OC-SUR-01`, `REP-01`) verificadas contra el catálogo de documentos. | Pestaña 1 de la app, `EpistemicAnalysisResponse` |
-| **E. Ingeniería y confiabilidad** (código organizado, errores, credenciales, pruebas, consultas nuevas) | Módulos separados, reintentos ante errores transitorios + modelo de respaldo (`gemini-2.5-flash`), reembolso de cuota si la llamada falla, ronda de reparación ante JSON truncado, `.env` fuera del repo, redacción de secretos, 23 pruebas + CI. Sin respuestas fijas: cualquier pregunta nueva pasa por el mismo flujo. | [`tests/test_suite.py`](file:///c:/jair/almena-brio-ai/tests/test_suite.py), [`ci.yml`](file:///c:/jair/almena-brio-ai/.github/workflows/ci.yml), [evidencia](file:///c:/jair/almena-brio-ai/docs/evidencia_pruebas.txt) |
+| **E. Ingeniería y confiabilidad** (código organizado, errores, credenciales, pruebas, consultas nuevas) | Módulos separados, reintentos ante errores transitorios + modelo de respaldo (`gemini-2.5-flash`), reembolso de cuota si la llamada falla, ronda de reparación ante JSON truncado, `.env` fuera del repo, redacción de secretos, 24 pruebas + CI. Sin respuestas fijas: cualquier pregunta nueva pasa por el mismo flujo. | [`tests/test_suite.py`](file:///c:/jair/almena-brio-ai/tests/test_suite.py), [`ci.yml`](file:///c:/jair/almena-brio-ai/.github/workflows/ci.yml), [evidencia](file:///c:/jair/almena-brio-ai/docs/evidencia_pruebas.txt) |
 | **Consultas de referencia** (las 4 del enunciado) | Probadas en vivo con Gemini: las 4 responden correctamente con grounding verificado (ver sección 6). | Sección 6 |
 | **Modalidad de demostración** | **Ejecución local desde mi computador** (`streamlit run app.py`), proyectada en la entrevista. | Sección 5.2 |
 
@@ -65,46 +65,51 @@ El equipo comercial de **Almena Foods** observó una caída en las ventas de su 
 > - Dentro de la aplicación (`streamlit run app.py`), abre la **Pestaña 4 (`⚙️ Trazabilidad y Arquitectura`)** para explorar el diagrama interactivo con selector **Vista Negocio / Vista Técnica**.
 > - También puedes abrir directamente en cualquier navegador el archivo interactivo autónomo: [`docs/arquitectura_interactiva.html`](file:///c:/jair/almena-brio-ai/docs/arquitectura_interactiva.html).
 
-### 2.1. Diagrama de Flujo de Datos y Controles de Seguridad
+### 2.1. Flujo de Datos y Componentes (Pipeline End-to-End)
 
 ```mermaid
 flowchart TD
-    subgraph IN["1. Capa de Entrada y Configuracion Dinamica"]
-        U["Analista / Usuario (Pregunta Libre o 1-Clic)"]
-        CFG["config/settings.toml (Esquema Configurable)"]
-        UP["Cargador en Vivo (Nuevos CSV / PDF / DOCX / MD)"]
-        SEC_IN["Validacion de Entrada y Cuotas (src/security.py)<br/>- Filtro Prompt Injection (NFKC/Homoglifos/Leet)<br/>- Delimitadores unicos por consulta<br/>- SessionRateLimiter y DailyUsageBudget"]
+    subgraph UI ["1. Interfaz y Usuario"]
+        A["🧑 Analista Comercial"] --> B["🖥️ Streamlit App (app.py)"]
     end
 
-    subgraph ENGINES["2. Motor Cuantitativo y Procesamiento Documental"]
-        DATA["Motor Cuantitativo (src/data_engine.py)<br/>- Inferencia dinamica de dimensiones y prefijos<br/>- Limpieza auditada de las 8 anomalias del CSV<br/>- Calculo exacto T1 vs T2, series mensuales y tiendas<br/>- Analisis de sensibilidad en cuarentena (V03997)"]
-        DOC["Motor Documental (src/doc_engine.py)<br/>- Parseo seguro PDF, MD y DOCX (defusedxml + limite ZIP)<br/>- Aislamiento por linea: retira OC-EXT-06<br/>  conservando limitaciones metodologicas adyacentes<br/>- Recuperacion BM25 + Entidades (sin tildes)"]
+    subgraph SEC ["2. Seguridad Perimetral"]
+        B --> C["🛡️ Firewall de Entrada & Cuotas (src/security.py)"]
+        C -- "Detección Prompt Injection / Leetspeak / Longitud" --> D{"¿Consulta Válida?"}
+        D -- No --> E["🛑 Bloqueo & Alerta Inmediata"]
+        D -- Sí --> F["🏷️ Tagging con Nonce Criptográfico"]
     end
 
-    subgraph AGENT["3. Orquestacion con LLM y Function Calling"]
-        CTX["Contexto Verificado + Incidentes Sanitizados<br/>(SIN raw_malicious_payload en el prompt)"]
-        LLM["Agente Comercial (src/agent.py - Gemini)<br/>- Herramientas deterministas via Function Calling<br/>- Reintentos + Modelo de respaldo (gemini-2.5-flash)<br/>- Esquema Pydantic: EpistemicAnalysisResponse"]
+    subgraph ENGINES ["3. Motores Duales (Verificables & Sanitizados)"]
+        F --> G["📊 Motor Cuantitativo (src/data_engine.py)"]
+        F --> H["📚 Motor Documental (src/doc_engine.py)"]
+        
+        G -- "Auditoría 8 anomalías CSV + Filtro T1 vs T2" --> G1["🧮 Pandas: Cálculos Deterministas Exactos"]
+        H -- "Cuarentena Quirúrgica de Payloads (OC-EXT-06)" --> H1["🔎 BM25: Búsqueda con Frontera de Palabras"]
     end
 
-    subgraph VERIFY["4. Verificacion Post-LLM y Trazabilidad"]
-        GRD["Grounding Validator (src/grounding.py)<br/>- Audita cifras en resumen_ejecutivo y hechos_comprobados<br/>- Valida archivos e IDs en fuentes_citadas<br/>- Filtra cualquier dato no respaldado (Score %)"]
-        OPS["LLMOps Tracer y UI (src/llmops.py / app.py)<br/>- Trazas JSONL con rotacion y redaccion de secretos<br/>- Tablero dinamico sin KPIs harcodeados"]
+    subgraph LLM ["4. Orquestación Neuro-Simbólica"]
+        G1 --> I["🧠 Gemini Agent (src/agent.py)"]
+        H1 --> I
+        I -- "Smart Context Routing + Constitución del Sistema" --> J["Structured Output (JSON)"]
     end
 
-    U --> SEC_IN
-    CFG --> DATA
-    CFG --> DOC
-    UP --> DATA
-    UP --> DOC
-    SEC_IN -->|"Pregunta validada + Nonce"| DATA
-    SEC_IN -->|"Busqueda BM25"| DOC
-    DATA -->|"Tablas exactas (<verified_sql_engine>)"| CTX
-    DOC -->|"Chunks limpios + Metadatos sin payload"| CTX
-    CTX --> LLM
-    LLM <-->|"Function Calling (consultas ad-hoc)"| DATA
-    LLM <-->|"Function Calling (evidencia adicional)"| DOC
-    LLM -->|"JSON estructurado"| GRD
-    GRD -->|"Respuesta 100% verificada"| OPS
+    subgraph VERIFIER ["5. Auditoría Post-LLM"]
+        J --> K["🔍 Grounding Validator (src/grounding.py)"]
+        K -- "Auditoría cifra por cifra contra traza de Pandas" --> L{"¿100% Cifras Cuadran?"}
+        L -- "Discrepancia detectada" --> M["✂️ Purgado automático de la oración"]
+        L -- "Cifras verificadas" --> N["✅ Certificación de Grounding (100%)"]
+    end
+
+    subgraph OUTPUT ["6. Entrega y Renderizado"]
+        N --> O["🧹 Filtro KaTeX (clean_epistemic_payload)"]
+        M --> O
+        O --> P["📋 Respuesta Epistémica en 4 Cuadrantes"]
+        P --> P1["🎯 Hechos Comprobados (100% Matemático)"]
+        P --> P2["💡 Hipótesis Cualitativas (Señales de Campo)"]
+        P --> P3["⚠️ Contradicciones y Alertas"]
+        P --> P4["🛑 Límites y Evidencia Insuficiente"]
+    end
 ```
 
 ### 2.2. Diagrama de Secuencia de una Consulta (Paso a Paso)
