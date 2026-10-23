@@ -489,13 +489,25 @@ class SalesDataEngine:
 
     def _validate_dimensions(self, cols: Iterable[str]) -> List[str]:
         clean_cols: List[str] = []
-        valid_map = {fold(c): c for c in self.dimensions + [self.period_col, "trimestre"]}
+        extra_time_cols = [c for c in [self.period_col, "trimestre", "semestre", "anio", "anio_trimestre"] if c in self.df_clean.columns or c in (self.period_col, "trimestre")]
+        valid_list = self.dimensions + [c for c in extra_time_cols if c not in self.dimensions]
+        valid_map = {fold(c): c for c in valid_list}
+        if "punto_venta_id" in valid_map:
+            valid_map.setdefault("tienda", valid_map["punto_venta_id"])
+            valid_map.setdefault("tiendas", valid_map["punto_venta_id"])
+            valid_map.setdefault("punto_venta", valid_map["punto_venta_id"])
+            valid_map.setdefault("punto_de_venta", valid_map["punto_venta_id"])
+        valid_map.setdefault("periodo", self.period_col)
         for c in cols:
-            key = fold(c)
+            key = fold(c).replace(" ", "_")
             if key not in valid_map:
-                raise DataQueryError(
-                    f"Columna '{c}' no existe. Dimensiones válidas: {self.dimensions + [self.period_col, 'trimestre']}"
-                )
+                key_plain = fold(c)
+                if key_plain in valid_map:
+                    key = key_plain
+                else:
+                    raise DataQueryError(
+                        f"Columna '{c}' no existe. Dimensiones válidas: {valid_list}"
+                    )
             clean_cols.append(valid_map[key])
         return clean_cols
 
@@ -508,7 +520,7 @@ class SalesDataEngine:
         if not filters:
             return df
         out = df
-        valid_map = {fold(c): c for c in self.dimensions + [self.period_col, "trimestre", self.id_col]}
+        valid_map = {fold(c): c for c in self.dimensions + [self.period_col, "trimestre", "semestre", "anio", "anio_trimestre", self.id_col]}
         for raw_col, raw_val in filters.items():
             if raw_val is None or raw_val == "":
                 continue
@@ -726,6 +738,171 @@ class SalesDataEngine:
             "agrupacion": group_cols,
             "filas": rows,
         }
+
+    def consultar_metricas_ventas(
+        self,
+        dimension: str,
+        metrica: str = "ventas",
+        operacion: str = "sum",
+        top_n: int = 5,
+        orden: str = "desc",
+        filters: Optional[Dict[str, Any]] = None,
+        periodo: Optional[str] = None,
+        use_clean_data: bool = True,
+    ) -> Dict[str, Any]:
+        """Permite agrupar y calcular agregaciones (sum, mean, count, max, min) por dimensiones como marca, region, canal, etc."""
+        raw_dims = [c.strip() for c in str(dimension or "").split(",") if c.strip()]
+        if not raw_dims:
+            raw_dims = [self.config["analysis"].get("default_focus_column", "marca")]
+        group_cols = self._validate_dimensions(raw_dims)
+
+        op_key = fold(operacion or "sum").replace(" ", "_")
+        op_map = {
+            "sum": "sum", "suma": "sum", "total": "sum",
+            "mean": "mean", "avg": "mean", "average": "mean", "promedio": "mean", "media": "mean",
+            "count": "count", "conteo": "count", "registros": "count", "transacciones": "count", "filas": "count",
+            "max": "max", "maximo": "max", "mayor": "max",
+            "min": "min", "minimo": "min", "menor": "min",
+            "median": "median", "mediana": "median",
+        }
+        if op_key not in op_map:
+            raise DataQueryError(
+                f"Operación '{operacion}' no soportada. Use: 'sum', 'mean', 'count', 'max', 'min' o 'median'."
+            )
+        op_norm = op_map[op_key]
+
+        ord_key = fold(orden or "desc")
+        if ord_key in ("desc", "descendente", "mayor", "top", "mayor_a_menor"):
+            ascending = False
+            ord_norm = "desc"
+        elif ord_key in ("asc", "ascendente", "menor", "bottom", "menor_a_mayor"):
+            ascending = True
+            ord_norm = "asc"
+        else:
+            raise DataQueryError(f"Orden '{orden}' no soportado. Use 'desc' o 'asc'.")
+
+        metric_col = DERIVED_COUNT if op_norm == "count" else self._normalize_metric(metrica)
+        limit_n = max(1, int(top_n)) if top_n is not None else 5
+
+        df = self.df_clean.copy() if use_clean_data else self._prepare_raw_for_comparison()
+        df = self._apply_filters(df, filters, use_clean_data=use_clean_data)
+        periodo_lbl = "semestre_completo"
+        if periodo and str(periodo).strip() and fold(str(periodo)) not in ("todo", "todos", "semestre", "total"):
+            p_lbl, p_months = self.resolve_period_months(str(periodo), df if not df.empty else self.df_clean)
+            df = df[df[self.period_col].isin(p_months)]
+            periodo_lbl = p_lbl
+        elif not df.empty and "semestre" in df.columns:
+            sems = sorted(df["semestre"].dropna().unique().tolist())
+            if len(sems) == 1:
+                periodo_lbl = sems[0]
+
+        if df.empty:
+            return {
+                "dimension": group_cols[0] if len(group_cols) == 1 else group_cols,
+                "agrupacion": group_cols,
+                "metrica": "venta_neta_cop" if metric_col == "venta_neta_cop_num" else metric_col,
+                "operacion": op_norm,
+                "orden": ord_norm,
+                "top_n": limit_n,
+                "periodo": periodo_lbl,
+                "total_general": 0.0,
+                "lider": None,
+                "filas": [],
+            }
+
+        counts_series = df.groupby(group_cols, dropna=False).size()
+        if metric_col == DERIVED_COUNT or op_norm == "count":
+            agg_series = counts_series.astype(float)
+            total_general = float(len(df))
+        elif metric_col == DERIVED_PRICE:
+            valid = df[df["unidades"].notna() & (df["unidades"] > 0)].copy()
+            valid["_unit_price"] = valid["venta_neta_cop_num"] / valid["unidades"]
+            g = valid.groupby(group_cols, dropna=False)
+            if op_norm in ("sum", "mean"):
+                agg_series = g["venta_neta_cop_num"].sum() / g["unidades"].sum()
+                tot_u = float(valid["unidades"].sum())
+                total_general = float(valid["venta_neta_cop_num"].sum()) / tot_u if tot_u > 0 else 0.0
+            else:
+                agg_series = getattr(g["_unit_price"], op_norm)()
+                total_general = float(getattr(valid["_unit_price"], op_norm)()) if not valid.empty else 0.0
+        else:
+            g = df.groupby(group_cols, dropna=False)[metric_col]
+            if op_norm == "sum":
+                agg_series = g.sum(min_count=1).fillna(0.0)
+                total_general = float(df[metric_col].sum())
+            else:
+                agg_series = getattr(g, op_norm)()
+                total_general = float(getattr(df[metric_col], op_norm)())
+
+        # Desglose auxiliar por trimestre cuando aplica para respaldar cualquier cifra adicional en Grounding
+        q_breakdown: Dict[Any, Dict[str, Optional[float]]] = {}
+        if op_norm == "sum" and metric_col in ("venta_neta_cop_num", "unidades") and "trimestre" in df.columns and "trimestre" not in group_cols:
+            q1, q2 = self.default_comparison_quarters()
+            piv_q = df.groupby(group_cols + ["trimestre"], dropna=False)[metric_col].sum().unstack(fill_value=0.0)
+            for idx_val, row_q in piv_q.iterrows():
+                v1 = float(row_q.get(q1, 0.0))
+                v2 = float(row_q.get(q2, 0.0))
+                q_breakdown[idx_val] = {
+                    "T1": _r(v1),
+                    "T2": _r(v2),
+                    "variacion_absoluta": _r(v2 - v1),
+                    "variacion_pct": _r(((v2 / v1) - 1.0) * 100.0) if v1 > 0 else None,
+                }
+
+        sorted_series = agg_series.sort_values(ascending=ascending, na_position="last")
+        metric_public = "venta_neta_cop" if metric_col == "venta_neta_cop_num" else metric_col
+
+        all_rows: List[Dict[str, Any]] = []
+        leader_val: Optional[float] = None
+        for rank_idx, (idx_key, val) in enumerate(sorted_series.items(), start=1):
+            key_tuple = idx_key if isinstance(idx_key, tuple) else (idx_key,)
+            f_val = float(val) if pd.notna(val) else 0.0
+            if rank_idx == 1:
+                leader_val = f_val
+            cnt_val = int(counts_series.get(idx_key, 0))
+            share_pct = (
+                _r((f_val / total_general) * 100.0)
+                if op_norm in ("sum", "count") and total_general > 0
+                else None
+            )
+            diff_vs_leader = _r(abs(leader_val - f_val)) if (leader_val is not None and rank_idx > 1) else 0.0
+            item: Dict[str, Any] = {
+                **{col: k for col, k in zip(group_cols, key_tuple)},
+                "valor": _r(f_val),
+                metric_public: _r(f_val),
+                "participacion_pct": share_pct,
+                "registros": cnt_val,
+                "diferencia_vs_lider": diff_vs_leader,
+                "ranking": rank_idx,
+            }
+            q_info = q_breakdown.get(idx_key if len(group_cols) > 1 else key_tuple[0])
+            if q_info:
+                item.update(q_info)
+            all_rows.append(item)
+
+        filas = all_rows[:limit_n]
+        brecha_1_2 = (
+            _r(abs(float(all_rows[0]["valor"]) - float(all_rows[1]["valor"])))
+            if len(all_rows) >= 2 and all_rows[0]["valor"] is not None and all_rows[1]["valor"] is not None
+            else None
+        )
+        return {
+            "dimension": group_cols[0] if len(group_cols) == 1 else group_cols,
+            "agrupacion": group_cols,
+            "metrica": metric_public,
+            "moneda": self.currency if metric_col in ("venta_neta_cop_num", DERIVED_PRICE) else None,
+            "operacion": op_norm,
+            "orden": ord_norm,
+            "top_n": limit_n,
+            "periodo": periodo_lbl,
+            "datos_limpios": use_clean_data,
+            "total_general": _r(total_general) or 0.0,
+            "lider": filas[0] if filas else None,
+            "brecha_lider_vs_segundo": brecha_1_2,
+            "filas": filas,
+        }
+
+    aggregate_sales_metrics = consultar_metricas_ventas
 
     def get_store_performance(
         self,

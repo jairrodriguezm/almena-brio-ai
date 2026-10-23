@@ -624,3 +624,94 @@ def test_escape_latex_dollars_neutralizes_katex_collision():
     assert cleaned["detalles"]["valor"] == "Precio \\$1.500 COP"
     assert cleaned["detalles"]["numero"] == 42
 
+
+def test_consultar_metricas_ventas_dynamic_aggregations(data_engine: SalesDataEngine):
+    """Verifica que la tool consultar_metricas_ventas agrupe y ordene correctamente por marca, región y canal."""
+    res_marca = data_engine.consultar_metricas_ventas(
+        dimension="marca", metrica="ventas", operacion="sum", top_n=5, orden="desc"
+    )
+    assert res_marca["lider"]["marca"] == "Luma"
+    assert res_marca["lider"]["valor"] == 2915498900.0
+    assert res_marca["lider"]["participacion_pct"] == 21.84
+    assert res_marca["total_general"] == 13348556500.0
+    assert [r["marca"] for r in res_marca["filas"]] == ["Luma", "Senda", "Brio", "Nativa", "Rizo"]
+
+    res_min = data_engine.consultar_metricas_ventas(
+        dimension="marca", metrica="ventas", operacion="sum", top_n=2, orden="asc"
+    )
+    assert res_min["lider"]["marca"] == "Rizo"
+    assert res_min["lider"]["valor"] == 2437041300.0
+    assert len(res_min["filas"]) == 2
+
+    res_mean = data_engine.consultar_metricas_ventas(
+        dimension="canal", metrica="unidades", operacion="mean", top_n=5, orden="desc"
+    )
+    assert len(res_mean["filas"]) == 2
+    assert res_mean["operacion"] == "mean"
+
+
+def test_open_analytical_question_routing_and_tool_execution(
+    data_engine: SalesDataEngine, doc_engine: DocumentSecurityEngine, tmp_path: Path
+):
+    """
+    Verifica que ante preguntas analíticas abiertas (ej. marca con mayores ventas en el semestre):
+    1) No se inyecte contexto estático de caída T1 vs T2 de Brío ni reporte preliminar.
+    2) Se habilite y ejecute la tool `consultar_metricas_ventas`.
+    3) El esquema soporte `formula_aplicada=None` y el verificador de Grounding valide a Luma (2.915.498.900 COP).
+    """
+    question = "¿Cuál fue la marca que tuvo mayores ventas en el semestre?"
+    agent = BrioEpistemicAgent(data_engine=data_engine, doc_engine=doc_engine)
+
+    ctx, _ = agent._build_deterministic_context(question)
+    assert "brio_por_region_limpio" not in ctx
+    assert "afirmaciones_preliminares_extraidas_de_documentos" not in ctx
+    assert "formula_convencion" not in ctx
+    assert agent._needs_custom_tool_call(question) is True
+
+    mock_payload = EpistemicAnalysisResponse(
+        resumen_ejecutivo="La marca que tuvo mayores ventas en el semestre fue Luma con 2.915.498.900 COP (21,84% del total semestral de 13.348.556.500 COP).",
+        hechos_comprobados=[
+            "Luma lideró las ventas netas del semestre con 2.915.498.900 COP en 804 registros válidos.",
+            "Senda ocupó el segundo lugar con 2.749.491.600 COP y Brío el tercero con 2.715.963.700 COP.",
+        ],
+        formula_aplicada=None,
+        hipotesis_cualitativas=[],
+        contradicciones_y_alertas=[],
+        limites_y_evidencia_insuficiente=[],
+        fuentes_citadas=["02_Ventas_2026.csv"],
+    )
+    assert mock_payload.formula_aplicada is None
+    assert mock_payload.sintesis_ejecutiva == mock_payload.resumen_ejecutivo
+
+    class FakeOpenModels:
+        def generate_content(self, model: str, contents: str, config: Any):
+            return type("R", (), {"parsed": mock_payload, "text": mock_payload.model_dump_json(), "usage_metadata": None})()
+
+    agent_mock = BrioEpistemicAgent(
+        data_engine=data_engine,
+        doc_engine=doc_engine,
+        tracer=LLMOpsTracer(log_path=tmp_path / "open_trace.jsonl"),
+        client_override=type("C", (), {"models": FakeOpenModels()})(),
+    )
+    out = agent_mock.ask(question, enforce_rate_limit=False, use_cache=False)
+    assert out["grounding"]["verified"] is True
+    assert "luma" in out["response"]["resumen_ejecutivo"].lower()
+    assert "2.915.498.900" in out["response"]["resumen_ejecutivo"]
+    assert any("consultar_metricas_ventas" in c["tool"] for c in out["trace"]["deterministic_calls"])
+
+
+@pytest.mark.skipif(
+    not looks_like_api_key(os.getenv("GEMINI_API_KEY", "")),
+    reason="Requiere GEMINI_API_KEY real para test de integración en vivo",
+)
+def test_live_open_question_top_brand_semester():
+    """Prueba E2E en vivo: ¿Cuál fue la marca que tuvo mayores ventas en el semestre? -> Luma (2.915.498.900 COP)."""
+    agent = BrioEpistemicAgent()
+    out = agent.ask("¿Cuál fue la marca que tuvo mayores ventas en el semestre?", use_cache=False)
+    summary = out["response"]["resumen_ejecutivo"].lower()
+    assert "luma" in summary
+    assert any(num in out["response"]["resumen_ejecutivo"] for num in ["2.915.498.900", "2,915,498,900", "2915498900"])
+    assert out["grounding"]["verified"] is True
+    assert any("consultar_metricas_ventas" in c["tool"] for c in out["trace"]["deterministic_calls"])
+
+
