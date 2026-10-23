@@ -195,6 +195,7 @@ sequenceDiagram
     3. `consultar_serie_temporal`: Evolución mensual o trimestral exacta por dimensión y métrica.
     4. `consultar_desempeno_tiendas`: Diagnóstico y variaciones de tiendas específicas o ranking de puntos de venta.
     5. `buscar_evidencia_documental`: Búsqueda léxica BM25 sobre notas de campo, entrevistas y reportes.
+    *(Ver especificación detallada de parámetros y diagrama de decisión en [Sección 3.3](#33-catálogo-de-herramientas-function-calling-tools-y-flujo-de-decisión))*
   - **Enrutamiento dinámico de contexto (Smart Context Routing):** Si la consulta es analítica abierta (no temporal), el orquestador omite tablas estáticas de variación T1 vs T2 en `<verified_sql_engine>`, habilitando *Automatic Function Calling* para consultar la base limpia en tiempo de ejecución.
   - **Esquema Pydantic flexible (`EpistemicAnalysisResponse`):** Campos como `formula_aplicada` son opcionales (`Optional[str] = None`), evitando forzar fórmulas `T2 - T1` en consultas que no involucren comparación temporal. Mantiene compatibilidad total con los campos de trazabilidad (`resumen_ejecutivo` / `sintesis_ejecutiva`, `hechos_comprobados`, `hipotesis_cualitativas`, `contradicciones_y_alertas` / `alertas_calidad`, `limites_y_evidencia_insuficiente`, `fuentes_citadas`).
   - **Alta disponibilidad y fallback:** Reintentos con *exponential backoff* (`_call_gemini_with_retries`), `HttpOptions(timeout=...)` y conmutación automática al modelo de respaldo (`gemini-2.5-flash`) si el modelo primario (`gemini-3.8-flash`) presenta fallos de servicio (503/500/429 persistente).
@@ -258,7 +259,40 @@ Para demostrar que la exclusión de `V03997` (`205` unidades de Brío Individual
 - **Sin imputar `V03997`:** Sur cae **`-30.27%`** (posición **#1** en caída).
 - **Imputando `V03997`:** Sur caería **`-29.59%`** (sigue en posición **#1** por más de 20 puntos porcentuales sobre Centro `-9.03%`).
 
-### 3.3. Optimización de Tokens, Latencia y Costos (FinOps)
+### 3.3. Catálogo de Herramientas (*Function Calling Tools*) y Flujo de Decisión
+
+El orquestador (`src/agent.py`) expone **5 herramientas deterministas** directamente a Google Gemini mediante *Automatic Function Calling (AFC)*. Cada herramienta ejecuta código en Python sobre los **3.996 registros auditados** (`SalesDataEngine`) o sobre el índice léxico BM25 (`DocumentSecurityEngine`), garantizando que el modelo jamás genere cálculos numéricos a partir de sus pesos neuronales:
+
+```mermaid
+flowchart TD
+    Q["Pregunta del Analista"] --> Intent{"¿Intención de la Consulta?"}
+    Intent -->|"Ranking / Suma / Participación"| F1["consultar_metricas_ventas"]
+    Intent -->|"Variación T1 vs T2 / Meses"| F2["consultar_comparacion_periodos"]
+    Intent -->|"Evolución y Tendencia Mensual"| F3["consultar_serie_temporal"]
+    Intent -->|"Puntos de Venta Específicos"| F4["consultar_desempeno_tiendas"]
+    Intent -->|"Notas de Campo / Entrevistas"| F5["buscar_evidencia_documental"]
+    
+    F1 & F2 & F3 & F4 --> Pandas["Motor Cuantitativo Determinista\n(SalesDataEngine / Pandas)"]
+    F5 --> BM25["Motor Cualitativo Desinfectado\n(DocumentSecurityEngine / BM25)"]
+    
+    Pandas & BM25 --> Gemini["Orquestador Cognitivo\n(Google Gemini 3.8 Flash)"]
+    Gemini --> Audit["Auditor Determinista Post-LLM\n(GroundingValidator)"]
+    Audit --> Output["Respuesta Estructurada (JSON)\n100% Grounding / Cero Alucinaciones"]
+```
+
+#### Especificación de las 5 Herramientas
+
+| Herramienta | Motor | Parámetros Principales | Propósito y Caso de Uso |
+| :--- | :---: | :--- | :--- |
+| **`consultar_metricas_ventas`** | Pandas | `dimension` *(marca, region, canal, presentacion, mes...)*<br>`metrica` *(ventas, unidades, precio...)*<br>`operacion` *(sum, mean, count, max, min)*<br>`top_n` *(default: 5)*, `orden` *(desc/asc)* | Resuelve consultas analíticas abiertas, rankings y participaciones de mercado sin forzar comparaciones temporales ni fórmulas $T2 - T1$. Retorna participaciones (`participacion_pct`) y total general. |
+| **`consultar_comparacion_periodos`** | Pandas | `marca` *(default: "Brio")*, `agrupar_por` *(region, canal...)*<br>`metrica`, `periodo_base` *(T1)*, `periodo_comparacion` *(T2)*<br>Filtros opcionales: `region`, `canal`, `presentacion` | Calcula la variación matemática absoluta ($\Delta$) y porcentual ($\Delta\%$) exacta entre dos periodos (T1 vs T2 o comparaciones intermensuales). |
+| **`consultar_serie_temporal`** | Pandas | `marca`, `agrupar_por`, `metrica`<br>`granularidad` *("mes" o "trimestre")* | Proyecta la evolución secuencial mensual o trimestral para diagnosticar tendencias, estacionalidad y puntos de inflexión temporal. |
+| **`consultar_desempeno_tiendas`** | Pandas | `punto_venta_ids` *(códigos separados por coma)*<br>`marca`, `metrica` | Diagnostica el desempeño T1 vs T2 en puntos de venta específicos (ej. tiendas con quiebres en notas de campo: `SU-T-004`, `SU-T-012`) o el ranking general de tiendas. |
+| **`buscar_evidencia_documental`** | BM25 | `consulta` *(términos de búsqueda léxica)*<br>`top_k` *(default: 6, máx: 10)* | Extrae fragmentos cualitativos de entrevistas (`INV-*`), notas de observación (`OC-*`) y reportes (`REP-*`), garantizando aislamiento de inyecciones y citas válidas. |
+
+---
+
+### 3.4. Optimización de Tokens, Latencia y Costos (FinOps)
 
 Para producción y escalabilidad empresarial, la solución incorpora una estrategia de optimización en 3 niveles que reduce el consumo de tokens en **~45% por consulta**:
 
@@ -275,7 +309,7 @@ Para producción y escalabilidad empresarial, la solución incorpora una estrate
      > `MANDATORY OUTPUT LANGUAGE: You MUST write all output text, narrative prose, and analytical summaries inside the JSON schema STRICTLY in fluent, professional Spanish.`
    - Ahorro medido: **~28% de tokens** en las directivas base, manteniendo la experiencia de usuario y el frontend 100% en español.
 
-### 3.4. Estándar `AGENTS.md` (Constitución para Agentes Autónomos)
+### 3.5. Estándar `AGENTS.md` (Constitución para Agentes Autónomos)
 
 Este repositorio implementa el estándar abierto [`AGENTS.md`](file:///c:/jair/almena-brio-ai/AGENTS.md):
 - **¿Qué es?** Así como `README.md` está diseñado para ingenieros humanos y `robots.txt` para rastreadores web, `AGENTS.md` es el contrato de directrices operativas para **asistentes de código basados en IA y agentes autónomos** (Antigravity, Cursor, Claude Code, Copilot Workspace, Devin).
