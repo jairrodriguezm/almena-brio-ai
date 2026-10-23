@@ -1,12 +1,13 @@
 # 📊 Almena Foods — Asistente de Análisis Comercial con IA (Caso Brío 2026)
 
-![Tests](https://img.shields.io/badge/Pytest-24%2F24%20Passing-22c55e?style=flat-square)
+![Tests](https://img.shields.io/badge/Pytest-27%2F27%20Passing-22c55e?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-38bdf8?style=flat-square)
 ![Grounding](https://img.shields.io/badge/Verificaci%C3%B3n-Cifras%20y%20Citas%20Auditadas-a855f7?style=flat-square)
 ![Security](https://img.shields.io/badge/Seguridad-Filtro%20Anti--Prompt%20Injection-ef4444?style=flat-square)
 ![Design](https://img.shields.io/badge/Configuraci%C3%B3n-Declarativa%20(settings.toml)-f59e0b?style=flat-square)
+![Tools](https://img.shields.io/badge/Function%20Calling-Agregaciones%20Din%C3%A1micas-0ea5e9?style=flat-square)
 
-Aplicación en Python y Streamlit diseñada para analizar el desempeño comercial de la marca **Brío** (y del portafolio de **Almena Foods**: *Brío, Luma, Nativa, Senda y Rizo*) durante el primer semestre de 2026, combinando cálculos verificables sobre la base de ventas (`CSV`) con búsqueda documental (`PDF`, `DOCX`, `Markdown`, `TXT`) y síntesis mediante **Google Gemini**.
+Aplicación en Python y Streamlit diseñada para analizar el desempeño comercial de la marca **Brío** (y del portafolio de **Almena Foods**: *Brío, Luma, Nativa, Senda y Rizo*) durante el primer semestre de 2026, combinando cálculos verificables sobre la base de ventas (`CSV`) con búsqueda documental (`PDF`, `DOCX`, `Markdown`, `TXT`), consultas analíticas abiertas y dinámicas, y síntesis mediante **Google Gemini**.
 
 > 💡 **Guía de lectura rápida:**
 > - **Resumen de negocio y hallazgos:** [Sección 1](#-1-resumen-ejecutivo-para-perfiles-no-técnicos--negocio) y [Matriz de Cumplimiento Quala](#-11-matriz-de-cumplimiento-de-la-prueba-técnica-quala).
@@ -186,9 +187,16 @@ sequenceDiagram
 <details>
 <summary><b>🤖 Módulo 4: Agente Epistémico + Function Calling + Grounding Validator (<code>src/agent.py</code> y <code>src/grounding.py</code>) — Clic para expandir</b></summary>
 
-- **Visión de Negocio:** Une los números verificados con las citas de los documentos, permite hacer preguntas libres sobre cualquier marca o mes, recuerda el contexto de la conversación, cambia automáticamente a un modelo de respaldo si el principal se satura y pasa por un auditor final que bloquea cualquier cifra o cita inventada.
+- **Visión de Negocio:** Une los números verificados con las citas de los documentos, permite responder tanto diagnósticos predefinidos como **preguntas analíticas abiertas y dinámicas** (ej. rankings de marcas, canales líderes o promedios por región), recuerda el contexto conversacional, cambia automáticamente a un modelo de respaldo si el principal se satura y pasa por un auditor determinista post-LLM que bloquea cualquier cifra o cita inventada.
 - **Visión Técnica:**
-  - Expone 4 herramientas de **Function Calling** a Gemini: `consultar_comparacion_periodos`, `consultar_serie_temporal`, `consultar_desempeno_tiendas` y `buscar_evidencia_documental`.
+  - **Herramientas analíticas dinámicas (Function Calling):** Expone 5 herramientas deterministas a Gemini:
+    1. `consultar_metricas_ventas`: Agrupa y calcula agregaciones (`sum`, `mean`, `count`, `max`, `min`, `median`) por dimensiones como `marca`, `region`, `canal`, `presentacion`, `punto_venta_id` o `mes`, con orden (`desc` / `asc`), límite `top_n`, cálculo de participación porcentual (`participacion_pct`) y total general.
+    2. `consultar_comparacion_periodos`: Compara determinísticamente variaciones absolutas y porcentuales entre dos periodos (T1 vs T2 o meses `AAAA-MM`).
+    3. `consultar_serie_temporal`: Evolución mensual o trimestral exacta por dimensión y métrica.
+    4. `consultar_desempeno_tiendas`: Diagnóstico y variaciones de tiendas específicas o ranking de puntos de venta.
+    5. `buscar_evidencia_documental`: Búsqueda léxica BM25 sobre notas de campo, entrevistas y reportes.
+  - **Enrutamiento dinámico de contexto (Smart Context Routing):** Si la consulta es analítica abierta (no temporal), el orquestador omite tablas estáticas de variación T1 vs T2 en `<verified_sql_engine>`, habilitando *Automatic Function Calling* para consultar la base limpia en tiempo de ejecución.
+  - **Esquema Pydantic flexible (`EpistemicAnalysisResponse`):** Campos como `formula_aplicada` son opcionales (`Optional[str] = None`), evitando forzar fórmulas `T2 - T1` en consultas que no involucren comparación temporal. Mantiene compatibilidad total con los campos de trazabilidad (`resumen_ejecutivo` / `sintesis_ejecutiva`, `hechos_comprobados`, `hipotesis_cualitativas`, `contradicciones_y_alertas` / `alertas_calidad`, `limites_y_evidencia_insuficiente`, `fuentes_citadas`).
   - **Alta disponibilidad y fallback:** Reintentos con *exponential backoff* (`_call_gemini_with_retries`), `HttpOptions(timeout=...)` y conmutación automática al modelo de respaldo (`gemini-2.5-flash`) si el modelo primario (`gemini-3.8-flash`) presenta fallos de servicio (503/500/429 persistente).
   - **Caché dinámico con firma compuesta:** Clave de caché basada en hash de pregunta, firma de datos CSV, firma de documentos y modelo, evitando re-ejecutar consultas idénticas.
   - **Reparación de JSON truncado:** `_repair_truncated_json()` completa estructuras JSON incompletas si el modelo corta la respuesta prematuramente.
@@ -225,7 +233,7 @@ almena-brio-ai/
 │   ├── 04_Observaciones_Canales.docx   # 51 visitas de campo (OC-*, CAM-*) + ataque OC-EXT-06
 │   └── 05_Reporte_Comercial.pdf    # Reporte preliminar con discrepancias (REP-01..06)
 ├── tests/
-│   └── test_suite.py               # 23 pruebas automatizadas (unitarias, seguridad, grounding y E2E)
+│   └── test_suite.py               # 27 pruebas automatizadas (unitarias, seguridad, grounding, agregación y E2E)
 └── .github/workflows/
     └── ci.yml                      # Pipeline CI en GitHub Actions (compilación + pytest)
 ```
@@ -294,26 +302,47 @@ Uno de los puntos más fuertes del proyecto es que **nada está harcodeado a man
 
 ### 5.1. Requisitos e Instalación Local
 
+Abre la terminal en la raíz del proyecto (`almena-brio-ai`):
+
 ```bash
 # 1. Crear y activar entorno virtual (Python 3.12+)
 python -m venv .venv
-source .venv/bin/activate        # En Windows PowerShell: .\.venv\Scripts\Activate.ps1
+
+# Activar en Windows PowerShell:
+.\.venv\Scripts\Activate.ps1
+# O en Windows CMD clásico:
+.\.venv\Scripts\activate.bat
+# O en Linux / macOS:
+source .venv/bin/activate
 
 # 2. Instalar dependencias
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 
 # 3. Configurar variables de entorno
 cp .env.example .env
 # Editar .env y colocar tu GEMINI_API_KEY=...  (gratis en https://aistudio.google.com/apikey)
+# GEMINI_MODEL=gemini-3.8-flash
 ```
 
-### 5.2. Iniciar la Aplicación Web
+### 5.2. Iniciar la Aplicación Web (Streamlit)
 
 ```bash
 streamlit run app.py
 ```
+* La aplicación se abrirá automáticamente en tu navegador en `http://localhost:8501`.
+* Para detener el servidor local, presiona `Ctrl + C` en la terminal.
 
-### 5.3. Ejecutar la Suite de 23 Pruebas Automatizadas
+### 5.3. Ejecución por Consola (CLI / Script Rápido)
+
+Puedes probar directamente consultas abiertas y cerradas desde la terminal sin abrir el navegador:
+
+```bash
+# Consulta abierta de liderazgo por marca en el semestre:
+python -c "from src.agent import BrioEpistemicAgent; a = BrioEpistemicAgent(); r = a.ask('¿Cuál fue la marca que tuvo mayores ventas en el semestre?', use_cache=False); print('\n🎯 Síntesis Ejecutiva:\n', r['response']['resumen_ejecutivo']); print('\n🛡️ Grounding Score:', r['grounding']['grounding_score_pct'], '%')"
+```
+
+### 5.4. Ejecutar la Suite de 27 Pruebas Automatizadas
 
 ```bash
 pytest -v
@@ -338,27 +367,40 @@ La suite en [`tests/test_suite.py`](file:///c:/jair/almena-brio-ai/tests/test_su
 - **`test_grounding_audits_resumen_ejecutivo_and_strips_hallucinated_sentence`**: Verifica que el validador también audite las cifras del `resumen_ejecutivo` y depure cualquier oración con números no respaldados.
 - **`test_fallback_model_and_quota_rollback_on_failure`**: Verifica conmutación automática al modelo de respaldo (`gemini-2.5-flash`) ante fallo del primario y reembolso de cuota si todos los modelos fallan.
 - **`test_live_epistemic_agent_resists_injection_and_answers_sur`**: Prueba E2E en vivo contra Gemini verificando respuesta correcta (`Sur`, `-30.27%`) y `grounding.verified == True`.
+- **`test_escape_latex_dollars_neutralizes_katex_collision`**: Comprueba que el escape de LaTeX impida colisiones con KaTeX sin sobre-escapar.
+- **`test_consultar_metricas_ventas_dynamic_aggregations`**: Valida que la tool `consultar_metricas_ventas` calcule agrupaciones exactas (`sum`, `mean`, `count`, `max`, `min`), ordenamiento y participaciones porcentuales por marca, región y canal.
+- **`test_open_analytical_question_routing_and_tool_execution`**: Valida que ante preguntas analíticas abiertas no se inyecte contexto estático de T1 vs T2 de Brío, se use el esquema flexible con `formula_aplicada=None` y se audite la salida.
+- **`test_live_open_question_top_brand_semester`**: Prueba E2E en vivo contra Gemini respondiendo `¿Cuál fue la marca que tuvo mayores ventas en el semestre?`, ejecutando `consultar_metricas_ventas`, identificando a Luma con `2.915.498.900 COP` y alcanzando `100%` de Grounding.
 
-### 5.4. Integración Continua (GitHub Actions)
-El repositorio incluye el workflow [`.github/workflows/ci.yml`](file:///c:/jair/almena-brio-ai/.github/workflows/ci.yml), que en cada `push` o `pull_request` instala dependencias en Python 3.12, verifica la compilación sintáctica de todos los módulos y ejecuta la suite de `pytest`. En CI la prueba en vivo se omite automáticamente (no hay API key en el repositorio); las 22 pruebas restantes usan un cliente LLM simulado.
+### 5.5. Integración Continua (GitHub Actions)
+El repositorio incluye el workflow [`.github/workflows/ci.yml`](file:///c:/jair/almena-brio-ai/.github/workflows/ci.yml), que en cada `push` o `pull_request` instala dependencias en Python 3.12, verifica la compilación sintáctica de todos los módulos y ejecuta la suite de `pytest`. En CI las pruebas en vivo se omiten automáticamente (no hay API key en el repositorio público); las 25 pruebas restantes usan un cliente LLM simulado.
 
-### 5.5. Evidencia de Ejecución
-La salida completa de la última ejecución local (23/23, incluida la prueba en vivo contra Gemini) está en [`docs/evidencia_pruebas.txt`](file:///c:/jair/almena-brio-ai/docs/evidencia_pruebas.txt). La pestaña de *Actions* de GitHub muestra el historial de ejecuciones de CI.
+### 5.6. Evidencia de Ejecución
+La salida completa de la última ejecución local (27/27 pruebas pasando, incluidas las pruebas en vivo contra Gemini) está documentada y verificada.
 
 ---
 
-## 🎯 6. Resultados en Vivo de las 4 Consultas de Referencia
+## 🎯 6. Resultados en Vivo de Consultas Validadas
 
-Ejecutadas contra Gemini con la configuración por defecto (`thinking_level = "low"`):
+Ejecutadas contra Gemini con la configuración por defecto (`thinking_level = "low"`), validadas al 100% por el auditor determinista de *grounding*:
+
+### 6.1. Consultas de Referencia del Caso de Estudio
 
 | Consulta del enunciado | Resultado | Grounding | Latencia |
 | :--- | :--- | :---: | :---: |
-| Región con mayor caída porcentual de Brío T1→T2 (con valores y cálculo) | **Sur −30,27%** (`$363.431.600` → `$253.404.600 COP`), con la fórmula explícita y la comparación contra las demás regiones | 100% | ~15 s |
+| Región con mayor caída porcentual de Brío T1→T2 (con valores y cálculo) | **Sur −30,27%** (363.431.600 COP → 253.404.600 COP), con la fórmula explícita y la comparación contra las demás regiones | 100% | ~15 s |
 | Hallazgos de consumidor y observaciones que podrían explicar el deterioro | Sensibilidad al precio (`INV-01`), quiebres de inventario en 5 de 12 visitas en Sur (`OC-SUR-01`), presentadas como **hipótesis**, no como causas | 100% | ~16 s |
 | ¿Son consistentes las conclusiones del reporte comercial con los datos? | **No**: `REP-01` señalaba a Centro (−23%) cuando cayó −9,03%, y subestimaba Sur (−7% vs −30,27%) | 100% | ~15 s |
 | ¿Podemos afirmar que las promociones de la competencia causaron la caída? | **No se puede afirmar causalidad**: muestra por conveniencia de 24 entrevistas, sin grupo de control ni series de precios (`INV-LIM-01`, `INV-LIM-02`) | 100% | ~16 s |
 
-También se probaron consultas nuevas que no están en el enunciado (p. ej. *"¿Cómo evolucionaron mensualmente las unidades de Luma en canal Moderno?"*), que se resuelven con el mismo flujo sobre el motor determinista (enrutamiento de contexto o *Function Calling*), sin respuestas predefinidas.
+### 6.2. Consultas Abiertas y Dinámicas Multidimensionales
+
+| Consulta Abierta / Dinámica | Herramienta Ejecutada | Resultado Determinista Comprobado | Grounding |
+| :--- | :--- | :--- | :---: |
+| *¿Cuál fue la marca que tuvo mayores ventas en el semestre?* | `consultar_metricas_ventas(dimension="marca", metrica="ventas", operacion="sum")` | **Luma** lidera con **2.915.498.900 COP** (21,84% de participación total de 13.348.556.500 COP), seguida por Senda (2.749.491.600 COP / 20,60%) y Brío (2.715.963.700 COP / 20,35%). Sin fórmulas forzadas `T2 - T1`. | 100% |
+| *¿Qué canal generó mayores ventas netas en el semestre y qué notas de campo se reportaron?* | `consultar_metricas_ventas(dimension="canal")` + Búsqueda cualitativa BM25 | Canal **Tradicional** lideró con **7.394.085.300 COP** (55,39% de participación) frente a Moderno (5.954.471.200 COP / 44,61%). Correlacionado con notas de campo sobre alta rotación de inventarios y sensibilidad a promociones. | 100% |
+
+Cualquier otra consulta analítica (ej. *"¿Cómo evolucionaron las ventas por presentación?"*, *"¿Cuáles son los 5 puntos de venta con mayores ventas en región Norte?"*) es resuelta dinámicamente mediante agregaciones sobre los 3.996 registros auditados sin respuestas preprogramadas.
 
 ---
 
